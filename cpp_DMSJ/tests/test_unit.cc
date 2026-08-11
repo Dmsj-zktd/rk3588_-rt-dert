@@ -374,6 +374,56 @@ void test_performance_benchmark()
 }
 
 // ============================================================================
+// 测试 12: detect_image 空图保护（uncle-bob 约束：新增代码必须配套单元测试）
+// ============================================================================
+void test_detect_image_guard()
+{
+	TEST("detect_image 空图保护");
+
+	PipelineManager pipeline(0, 0, 0, "dummy_model.rknn", 4, 0.45f, RKNN_NPU_CORE_AUTO);
+	cv::Mat empty_img;
+	cv::Mat out_img;
+
+	ASSERT_TRUE(!pipeline.detect_image(empty_img, out_img), "空图应返回 false");
+	ASSERT_TRUE(out_img.empty(), "空图不应产生输出图片");
+
+	PASS();
+}
+
+// ============================================================================
+// 测试 13: preprocess_mat_to_dma 正确性（回归：非对齐宽度输入污染问题）
+// ============================================================================
+void test_preprocess_mat_to_dma_correctness()
+{
+	TEST("preprocess_mat_to_dma 正确性(1360宽回归)");
+
+	// 模拟 uav.jpg 的 1360 宽非对齐输入，每行不同颜色
+	cv::Mat src(765, 1360, CV_8UC3);
+	for (int y = 0; y < src.rows; ++y)
+	{
+		src.row(y).setTo(cv::Scalar(y % 256, 0, 255));
+	}
+
+	// CPU 参考：与原版一致的 resize + BGR→RGB
+	cv::Mat ref;
+	cv::resize(src, ref, cv::Size(640, 640));
+	cv::cvtColor(ref, ref, cv::COLOR_BGR2RGB);
+
+	RgaPreprocessor& pre = rga_preprocessor();
+	pre.init(2);
+
+	DmaBufferPtr out = pre.preprocess_mat_to_dma(src);
+	ASSERT_TRUE(out != nullptr, "preprocess_mat_to_dma 失败");
+	ASSERT_TRUE(out->width == 640 && out->height == 640, "输出尺寸错误");
+	ASSERT_TRUE(out->format == RK_FORMAT_RGB_888, "输出格式应为 RGB");
+
+	bool match = (memcmp(out->ptr, ref.data, ref.total() * ref.elemSize()) == 0);
+	ASSERT_TRUE(match, "输出与 CPU 参考不一致（stride 对齐污染回归）");
+
+	PASS();
+}
+
+// ============================================================================
 // 主函数
 // ============================================================================
 int main()
@@ -398,6 +448,8 @@ int main()
 	test_bounded_queue_poison();
 
 	test_performance_benchmark();
+	test_detect_image_guard();
+	test_preprocess_mat_to_dma_correctness();
 
 	std::cout << std::endl;
 	std::cout << "============================================" << std::endl;

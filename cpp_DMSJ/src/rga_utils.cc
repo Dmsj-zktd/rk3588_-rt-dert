@@ -214,17 +214,37 @@ DmaBufferPtr RgaPreprocessor::preprocess_mat_to_dma(const cv::Mat& src)
 		return nullptr;
 	}
 
-	// 避免使用局部临时池，改用全局池
-	DmaBufferPool& temp_src_pool = get_src_pool(src.cols, src.rows, RK_FORMAT_BGR_888);
-	DmaBufferPtr src_dma = bridge_mat_to_dma(src, temp_src_pool);
-	if (!src_dma)
+	// 【正确性修复】与原版 rknn_rtdetr_demo 对齐：
+	// 先 CPU resize + BGR→RGB，再紧致写入 640x640 DMA（stride=1920 == 640*3）。
+	// 原因：DRM 源缓冲 stride 会对齐（如 1360 宽 → 4096），而 RGA wrapbuffer 的
+	// wstride=width 无法表达 3 字节像素的非整除 stride，导致非对齐宽度输入
+	// （uav.jpg 1360 宽、录屏 480 宽等）图像被逐行偏移污染 → 检测失效。
+	// 640x640 目标 stride=1920 与 wstride 严格一致，NPU 零拷贝输入不受影响。
+	cv::Mat resized;
+	cv::resize(src, resized, cv::Size(INPUT_WIDTH, INPUT_HEIGHT));
+	cv::cvtColor(resized, resized, cv::COLOR_BGR2RGB);
+
+	DmaBufferPtr dst = dst_pool_->alloc();
+	if (!dst)
 	{
-		std::cerr << "[RGA] bridge_mat_to_dma failed\n";
+		std::cerr << "[RGA] dst pool alloc failed\n";
 		return nullptr;
 	}
 
-	// 调用 DMA→DMA 硬件加速路径
-	return preprocess_dma_to_dma(src_dma);
+	// 紧致拷贝（dst stride 恒为 640*3=1920，与 resized 行宽一致）
+	uint8_t* dst_ptr = (uint8_t*)dst->ptr;
+	const uint8_t* src_ptr = resized.data;
+	const size_t row_bytes = (size_t)resized.cols * resized.elemSize();
+	for (int y = 0; y < resized.rows; ++y)
+	{
+		memcpy(dst_ptr, src_ptr, row_bytes);
+		dst_ptr += dst->stride;
+		src_ptr += resized.step;
+	}
+
+	dst->format = RK_FORMAT_RGB_888;
+	g_perf.total_virt_to_dma++;
+	return dst;
 }
 
 // ============================================================================

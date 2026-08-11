@@ -6,6 +6,7 @@
 #include <iostream>
 #include <chrono>
 #include <algorithm>
+#include <rga.h>
 
 static inline int64_t now_us()
 {
@@ -133,6 +134,55 @@ void PipelineManager::push_image(int frame_id, const cv::Mat& img)
 	bundle->use_dma_src = false;
 	bundle->t_enqueue = now_us();
 	queue_raw_.push(std::move(bundle));
+}
+
+// ============================================================================
+// 同步单帧图片检测（图片输入模式）
+// ============================================================================
+bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
+{
+	if (src.empty())
+	{
+		std::cerr << "[Pipeline] detect_image: empty input image\n";
+		return false;
+	}
+
+	// 1. cv::Mat → 640x640 RGB DMA（CPU resize+cvtColor 后紧致拷贝，
+	//    与原版一致；避免 RGA 源 stride 对齐污染问题）
+	DmaBufferPtr input_buf = rga_preprocessor().preprocess_mat_to_dma(src);
+	if (!input_buf)
+	{
+		std::cerr << "[Pipeline] detect_image: preprocess failed\n";
+		return false;
+	}
+
+	// 3. NPU 推理（独立 context，与视频 worker 互不影响）
+	RKNNDetector detector;
+	if (!detector.init(model_path_, npu_mask_))
+	{
+		std::cerr << "[Pipeline] detect_image: detector init failed\n";
+		return false;
+	}
+	std::vector<float> pred_boxes;
+	std::vector<float> pred_logits;
+	int num_boxes = 0;
+	int num_classes = 0;
+	if (!detector.infer_zero_copy(input_buf, pred_boxes, pred_logits, num_boxes, num_classes))
+	{
+		std::cerr << "[Pipeline] detect_image: inference failed\n";
+		return false;
+	}
+
+	// 4. 后处理解码 + 画框
+	std::vector<DetectResult> results = decode_rtdetr_output(
+	                                      pred_boxes.data(), pred_logits.data(),
+	                                      num_boxes, src.cols, src.rows,
+	                                      conf_thres_, num_classes);
+	out = src.clone();
+	draw_results(out, results);
+
+	std::cerr << "[Pipeline] detect_image: " << results.size() << " targets\n";
+	return true;
 }
 
 // ============================================================================

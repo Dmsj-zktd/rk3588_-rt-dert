@@ -86,7 +86,8 @@ bool RKNNDetector::query_io_attrs()
 		}
 	}
 
-	// 遍历所有输出，通过名称识别 boxes 和 logits
+	// 遍历所有输出，通过形状识别 boxes 和 logits
+	// （与原版 rknn_rtdetr_demo 一致：boxes n_elems==300*4，logits n_elems==300*NUM_CLASSES，最后匹配者胜）
 	boxes_idx_ = -1;
 	logits_idx_ = -1;
 	for (int i = 0; i < n_output_; ++i)
@@ -104,45 +105,16 @@ bool RKNNDetector::query_io_attrs()
 		          << " scale=" << attr.scale << " zp=" << attr.zp
 		          << " name=" << attr.name << "\n";
 
-		std::string name(attr.name);
-		if (name == "pred_boxes")
+		// 与原版一致：按元素数精确匹配（300*4 / 300*NUM_CLASSES），最后匹配者胜
+		if (attr.n_elems == 300 * 4)
 		{
 			boxes_idx_ = i;
 			boxes_attr_ = attr;
 		}
-		else if (name == "pred_logits")
+		if (attr.n_elems == 300 * NUM_CLASSES)
 		{
 			logits_idx_ = i;
 			logits_attr_ = attr;
-		}
-	}
-
-	// 若名称匹配失败，则通过 n_elems 启发式识别（兼容老模型）
-	if (boxes_idx_ < 0 || logits_idx_ < 0)
-	{
-		std::cerr << "[RKNN] Name matching failed, fallback to n_elems heuristic\n";
-		for (int i = 0; i < n_output_; ++i)
-		{
-			rknn_tensor_attr attr;
-			attr.index = i;
-			rknn_query(ctx_, RKNN_QUERY_OUTPUT_ATTR, &attr, sizeof(attr));
-			// 假设 boxes 具有 4 的倍数元素
-			if (attr.n_elems % 4 == 0 && attr.n_elems > 4)
-			{
-				// 可能的 boxes
-				if (boxes_idx_ < 0)
-				{
-					boxes_idx_ = i;
-					boxes_attr_ = attr;
-				}
-			}
-			// 假设 logits 的 n_elems 是 boxes 的 NUM_CLASSES 倍
-			// 更可靠：logits 的元素数通常大于 boxes
-			if (attr.n_elems > boxes_attr_.n_elems && attr.n_elems % 300 == 0)
-			{
-				logits_idx_ = i;
-				logits_attr_ = attr;
-			}
 		}
 	}
 
@@ -155,7 +127,7 @@ bool RKNNDetector::query_io_attrs()
 	// 从 logits 推断类别数(日志)
 	int detected_classes = logits_attr_.n_elems / 300;
 	std::cerr << "[RKNN] Detected num_classes from model = " << detected_classes
-	          << ", but forcing to " << NUM_CLASSES << " (as defined in types.h)\n";
+	          << " (aligned with NUM_CLASSES=" << NUM_CLASSES << ")\n";
 
 	return true;
 }
@@ -265,6 +237,7 @@ bool RKNNDetector::infer_zero_copy(const DmaBufferPtr& input_buf,
 		out_logits.assign(l_data, l_data + 300 * NUM_CLASSES);
 		num_boxes = 300;
 		num_classes = NUM_CLASSES;
+
 	}
 	else
 	{

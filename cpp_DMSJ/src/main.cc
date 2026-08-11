@@ -35,6 +35,7 @@ struct Args
 {
 	std::string model_path;
 	std::string video_path;
+	std::string image_path;
 	std::string device     = "/dev/video0";
 	std::string output_path;
 	int  width      = 1920;
@@ -59,6 +60,7 @@ void print_usage(const char* prog)
 	          << "Options:\n"
 	          << "  -m, --model <path>      RT-DETR RKNN model path (required)\n"
 	          << "  -v, --video <path>      Video file path (default: camera)\n"
+	          << "  -i, --image <path>      Image file path (single image detection)\n"
 	          << "  -d, --device <dev>      V4L2 device (default: /dev/video0)\n"
 	          << "  -W, --width <n>         Capture width (default: 1920, fallback)\n"
 	          << "  -H, --height <n>        Capture height (default: 1080, fallback)\n"
@@ -103,6 +105,10 @@ bool parse_args(int argc, char** argv, Args& args)
 		else if (arg == "-v" || arg == "--video")
 		{
 			args.video_path = get_val("video");
+		}
+		else if (arg == "-i" || arg == "--image")
+		{
+			args.image_path = get_val("image");
 		}
 		else if (arg == "-d" || arg == "--device")
 		{
@@ -194,7 +200,45 @@ bool parse_args(int argc, char** argv, Args& args)
 		print_usage(argv[0]);
 		return false;
 	}
+	if (!args.image_path.empty() && !args.video_path.empty())
+	{
+		std::cerr << "Error: -i/--image and -v/--video are mutually exclusive\n";
+		return false;
+	}
 	return true;
+}
+
+// ============================================================================
+// 图片检测模式（单帧同步检测）
+// ============================================================================
+int run_image_mode(const Args& args, PipelineManager& pipeline)
+{
+	cv::Mat img = cv::imread(args.image_path, cv::IMREAD_COLOR);
+	if (img.empty())
+	{
+		std::cerr << "[Main] Failed to load image: " << args.image_path << "\n";
+		return 1;
+	}
+
+	int64_t t0 = now_us();
+	cv::Mat out;
+	if (!pipeline.detect_image(img, out))
+	{
+		std::cerr << "[Main] detect_image failed\n";
+		return 1;
+	}
+	int64_t dt_us = now_us() - t0;
+
+	std::string out_path = args.output_path.empty() ? "out_detect.jpg" : args.output_path;
+	if (!cv::imwrite(out_path, out))
+	{
+		std::cerr << "[Main] Failed to write output image: " << out_path << "\n";
+		return 1;
+	}
+
+	std::cerr << "[Main] Image detection done: " << out_path
+	          << " (e2e " << dt_us / 1000.0 << " ms)\n";
+	return 0;
 }
 
 // ============================================================================
@@ -265,24 +309,18 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 	int actual_w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
 	int actual_h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
 	std::cerr << "[Main] Video resolution: " << actual_w << "x" << actual_h << "\n";
-	// rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
 
 	if (!args.output_path.empty())
 	{
 		pipeline.set_video_output(args.output_path, fps);
 	}
 
-	// 创建源 DMA buffer 池（用于桥接 cv::Mat → DMA）
-	DmaBufferPool& src_pool = rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
-
 	int frame_id = 0;
 	cv::Mat frame;
 	while (!g_should_exit && cap.read(frame))
 	{
-		// 桥接：cv::Mat → DMA buffer（一次性拷贝）
-		DmaBufferPtr src_buf = rga_preprocessor().bridge_mat_to_dma(frame, src_pool);
-		if (!src_buf) continue;
-		pipeline.push_dma_frame(frame_id++, src_buf, frame);  // 传入原始图像
+		// 与原版一致：cv::Mat 直接入队，worker 内完成 resize+cvtColor+紧致 DMA 拷贝
+		pipeline.push_image(frame_id++, frame);
 	}
 	cap.release();
 	return 0;
@@ -313,22 +351,17 @@ int run_opencv_camera_mode(const Args& args, PipelineManager& pipeline)
 	int actual_w = first_frame.cols;
 	int actual_h = first_frame.rows;
 	std::cerr << "[Main] Camera actual resolution: " << actual_w << "x" << actual_h << "\n";
-	rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
 
 	if (!args.output_path.empty())
 	{
 		pipeline.set_video_output(args.output_path, args.fps);
 	}
 
-	DmaBufferPool& src_pool = rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
-
 	int frame_id = 0;
 	cv::Mat frame = first_frame.clone();
 	while (!g_should_exit)
 	{
-		DmaBufferPtr src_buf = rga_preprocessor().bridge_mat_to_dma(frame, src_pool);
-		if (!src_buf) continue;
-		pipeline.push_dma_frame(frame_id++, src_buf, frame);
+		pipeline.push_image(frame_id++, frame);
 		if (!cap.read(frame)) break;
 	}
 	cap.release();
@@ -346,16 +379,23 @@ int main(int argc, char** argv)
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);
 
-	// 创建流水线
-	PipelineManager pipeline(args.pre_workers, args.npu_workers,
-	                         args.post_workers, args.model_path,
+	// 创建流水线（图片模式无需线程池 worker，走同步单帧接口）
+	int pre_workers  = args.image_path.empty() ? args.pre_workers  : 0;
+	int npu_workers  = args.image_path.empty() ? args.npu_workers  : 0;
+	int post_workers = args.image_path.empty() ? args.post_workers : 0;
+	PipelineManager pipeline(pre_workers, npu_workers, post_workers,
+	                         args.model_path,
 	                         args.queue_cap, args.conf, args.npu_mask);
 
 	// 注意：此处不再统一调用 set_video_output，而是在各个采集模式中按需调用
 
 	// 选择采集模式
 	int ret = 0;
-	if (!args.video_path.empty())
+	if (!args.image_path.empty())
+	{
+		ret = run_image_mode(args, pipeline);
+	}
+	else if (!args.video_path.empty())
 	{
 		ret = run_video_mode(args, pipeline);
 	}
