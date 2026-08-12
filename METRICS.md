@@ -76,3 +76,46 @@
 - `-G` 行为实测：`-G 0` 仅错误+运行报告；`-G 1` 仅 `[Main]`；`-G 2` = `[Main]+[RKNN]`；`-G 8` = 全部。
 - FPS 无回归：performance 模式下默认全日志 **15.53 FPS**（基线 15.68，正常波动）；确认此前 14.9 FPS 波动源于板端 governor 被重置为 schedutil，与日志系统无关。
 - 日志开销：流式直写 cerr（无缓冲/堆分配），近似零开销。
+
+## 任务 3：RGA_DMA 链路分析与优化（2026-08-12）
+
+### 架构/原理
+- `DmaBufferPool`：DRM `CREATE_DUMB` 分配物理连续内存 → PRIME fd 导出 → mmap 虚拟地址，供 RGA（`wrapbuffer_fd`）与 NPU（rknn 零拷贝 fd）共享。
+- RGA 预处理：wrapbuffer 三策略（handle / fd / virtualaddr）；`imresize` + `imcvtcolor` 两步（板端 librga 2.2.0 无 `imresize_then_cvtcolor` 单指令）。
+- mat 输入链路（任务 1 修复后）：CPU resize+cvtColor → 紧致 DMA 拷贝（正确但 CPU 占用高）。
+
+### 不足
+1. DRM 源缓冲 stride 对齐（如 1360 宽 → 4096）与 RGA `wstride=width`（像素）在 3 字节格式下非整除冲突 → 非对齐宽度输入被逐行偏移污染（任务 1 已绕开，未根治）。
+2. mat 路径 CPU 负担：resize+cvtColor ~8ms + Mat→DMA 桥接 memcpy。
+3. V4L2/相机 DMA→DMA 路径仍存在同源 stride 隐患（当前不在验收范围，建议后续以 4 字节像素源缓冲根治）。
+
+### 迭代优化 1（本次）：mat 输入改走 RGA virt→DMA
+- 源：cv::Mat 连续内存虚拟地址（紧致 stride=width*3，RGA wstride 可精确表达）→ 目标 640×640 RGB DMA（stride=1920）。
+- 消除 CPU resize/cvtColor 与桥接 memcpy；失败自动回退 CPU 路径（一次性告警，不刷屏）。
+- 正确性：单测 MAE=0.109（RGA vs CPU 参考，阈值 3.0），14/14 通过；uav.jpg @0.45 = 37 目标（原版 38，等价）。
+
+### 指标对比（cars.mp4，最佳参数，performance 模式）
+
+| 指标 | 任务 2 后（CPU 路径） | 任务 3 后（RGA virt→DMA） | 变化 |
+|------|----------------------|---------------------------|------|
+| 平均 CPU | 453% | **416%** | -8% |
+| 峰值 CPU | 487% | **455%** | -7% |
+| 峰值 RSS | 1527 MB | **1492 MB** | -35 MB |
+| 预处理均值 | 8.16 ms | **5.46 ms** | -33% |
+| 整体 FPS | 15.53 | **15.85** | +2% |
+
+> 结论：正确性无损前提下，CPU -8%、内存 -35MB、预处理 -33%、FPS +2%。可继续迭代方向：相机 DMA→DMA 用 4bpp 源根治 stride；视频帧环形缓冲消除 orig_img clone。
+
+### 迭代优化 2（2026-08-12）：相机 DMA→DMA 通路 stride 安全化（模拟测试）+ worker 配置内存/CPU 实测
+
+- **代码修复**：`preprocess_dma_to_dma` 源 wstride 改为 `实际 stride / bpp`（如 1280 宽 stride=3840 → wstride=1280）；当 3 字节格式 stride 非整除（如 1360 宽 → 4096，4080%3!=0）时，跳过 RGA 包装，**安全回退 CPU 按实际 stride 逐行读取 DMA 内存**完成 resize+cvtColor，杜绝逐行偏移污染。
+- **模拟测试**：`test_unit` 新增 1360×765 BGR24 模拟相机帧（stride=4096）→ 输出与 CPU 参考 MAE<3 通过；单测 **15/15**。
+- **worker 配置对照**（cars.mp4，-p 2 -P 3，performance 模式）：
+
+| -n | 平均 CPU | 峰值 RSS | 整体 FPS | 相对 -n 14 |
+|----|----------|----------|----------|------------|
+| 6  | 293%     | 783 MB   | 14.77    | CPU -32% / 内存 -48% / FPS -7% |
+| **8** | **365%** | **953 MB** | **15.31** | **CPU -15% / 内存 -36% / FPS -3%** |
+| 14（最佳性能基准） | 430% | 1500 MB | 15.82 | - |
+
+> 用户决策（2026-08-12）：`-n 8` 正式列为"显著降 CPU/内存甜点位"基准，`-n 14` 继续作为"最佳性能（最高 FPS）"基准，均已写入 AGENTS.md。

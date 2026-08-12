@@ -193,11 +193,11 @@ make -j$(nproc)
 
 | 阶段                         | 耗时（均值）   |
 | ---------------------------- | -------------- |
-| 预处理（CPU resize+cvtColor，mat 输入） | ~ 5~8ms        |
-| NPU 推理（默认 -n 3，640×640 INT8）     | ~ 350ms/帧     |
-| NPU 推理（最佳 -n 14，3 核饱和）        | ~ 857ms/帧（吞吐 ~15.7 FPS） |
+| 预处理（RGA virt→DMA，mat 输入）        | ~ 5.5ms        |
+| NPU 推理（640×640 INT8，3 核饱和）      | ~ 850ms/帧     |
 | 后处理 + 画框                | ~ 45ms         |
-| **整体 FPS**（最佳 -p 2 -n 14 -P 3）    | **~ 15.7 FPS** |
+| **整体 FPS**（最佳性能 -p 2 -n 14 -P 3） | **~ 15.8 FPS**（CPU ~430%、RSS ~1500MB） |
+| **整体 FPS**（甜点位 -p 2 -n 8 -P 3）    | **~ 15.3 FPS**（CPU ~365%、RSS ~953MB） |
 
 > 以上为一次实测的均值参考，实际性能受模型复杂度、输入分辨率、线程/核心配置及 CPU 调度等影响，请以实际测量为准。
 
@@ -219,6 +219,12 @@ make -j$(nproc)
   - 单测 14/14；FPS 无回归（performance 下 15.53 vs 基线 15.68）。
 
 ---
+
+- **2026-08-12｜任务 3：RGA_DMA 链路分析与迭代优化**
+  - 分析：DRM dumb buffer → PRIME fd → RGA/NPU 三方共享；发现 DRM 源 stride 对齐（如 1360 宽 → 4096）与 RGA `wstride=width` 在 3 字节格式下非整除冲突。
+  - 迭代 1：mat 输入改走 RGA virt→DMA（cv::Mat 连续内存 → 640×640 RGB DMA），消除 CPU resize/cvtColor 与桥接 memcpy，失败回退 CPU；CPU 453%→416%、RSS 1527→1492MB、pre 8.16→5.46ms、FPS 15.53→15.85。
+  - 迭代 2：相机 DMA→DMA stride 安全化（wstride=实际 stride/bpp，非整除自动回退 CPU 逐行读取）+ 模拟测试；单测 15/15。
+  - 基准参数双档：最佳性能 `-p 2 -n 14 -P 3`（FPS ~15.8 / CPU ~430% / RSS ~1500MB）；甜点位 `-p 2 -n 8 -P 3`（FPS ~15.3 / CPU ~365% / RSS ~953MB）。
 
 ## 🧪 测试与验证
 

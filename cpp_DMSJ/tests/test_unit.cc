@@ -418,8 +418,69 @@ void test_preprocess_mat_to_dma_correctness()
 	ASSERT_TRUE(out->width == 640 && out->height == 640, "输出尺寸错误");
 	ASSERT_TRUE(out->format == RK_FORMAT_RGB_888, "输出格式应为 RGB");
 
-	bool match = (memcmp(out->ptr, ref.data, ref.total() * ref.elemSize()) == 0);
-	ASSERT_TRUE(match, "输出与 CPU 参考不一致（stride 对齐污染回归）");
+	// RGA 插值与 OpenCV 插值非逐位一致，用平均绝对误差(MAE)判定正确性
+	const uint8_t* a = (const uint8_t*)out->ptr;
+	const uint8_t* b = ref.data;
+	const size_t n = ref.total() * ref.elemSize();
+	double sum = 0.0;
+	for (size_t k = 0; k < n; ++k)
+	{
+		sum += (a[k] >= b[k]) ? (a[k] - b[k]) : (b[k] - a[k]);
+	}
+	double mae = sum / n;
+	ASSERT_TRUE(mae < 3.0, "输出与 CPU 参考 MAE 过大（RGA/stride 污染回归）");
+	std::cout << "MAE=" << mae << " ";
+
+	PASS();
+}
+
+// ============================================================================
+// 测试 15: preprocess_dma_to_dma stride 安全（模拟相机 DMA→DMA 非对齐宽度）
+// ============================================================================
+void test_dma_to_dma_stride_safe()
+{
+	TEST("preprocess_dma_to_dma stride 安全(1360宽)");
+
+	// 模拟 V4L2 相机 BGR24 帧：1360x765，DRM stride 可能为 4096（1360*3=4080 非对齐）
+	cv::Mat src(765, 1360, CV_8UC3);
+	for (int y = 0; y < src.rows; ++y)
+	{
+		src.row(y).setTo(cv::Scalar(y % 256, 0, 255));
+	}
+
+	DmaBufferPool pool(1360, 765, RK_FORMAT_BGR_888, 1);
+	DmaBufferPtr dma = pool.alloc();
+	ASSERT_TRUE(dma != nullptr, "DMA 分配失败");
+	LOG(MOD_TEST, LOG_INFO) << "simulated cam stride=" << dma->stride
+	          << " width*3=" << 1360 * 3 << "\n";
+
+	// 按实际 stride 逐行写入，模拟相机输出
+	uint8_t* drow = (uint8_t*)dma->ptr;
+	for (int y = 0; y < src.rows; ++y)
+	{
+		memcpy(drow, src.ptr<uint8_t>(y), 1360 * 3);
+		drow += dma->stride;
+	}
+
+	// CPU 参考
+	cv::Mat ref;
+	cv::resize(src, ref, cv::Size(640, 640));
+	cv::cvtColor(ref, ref, cv::COLOR_BGR2RGB);
+
+	RgaPreprocessor& pre = rga_preprocessor();
+	pre.init(2);
+	DmaBufferPtr out = pre.preprocess_dma_to_dma(dma);
+	ASSERT_TRUE(out != nullptr, "preprocess_dma_to_dma 失败");
+
+	const uint8_t* a = (const uint8_t*)out->ptr;
+	const uint8_t* b = ref.data;
+	const size_t n = ref.total() * ref.elemSize();
+	double sum = 0.0;
+	for (size_t k = 0; k < n; ++k)
+	{
+		sum += (a[k] >= b[k]) ? (a[k] - b[k]) : (b[k] - a[k]);
+	}
+	ASSERT_TRUE(sum / n < 3.0, "输出与 CPU 参考 MAE 过大（stride 污染）");
 
 	PASS();
 }
@@ -476,6 +537,7 @@ int main()
 	test_performance_benchmark();
 	test_detect_image_guard();
 	test_preprocess_mat_to_dma_correctness();
+	test_dma_to_dma_stride_safe();
 	test_logger_modules();
 
 	std::cout << std::endl;
