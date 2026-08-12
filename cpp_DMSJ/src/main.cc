@@ -2,6 +2,7 @@
 #include "v4l2_capture.h"
 #include "rga_utils.h"
 #include "drm_alloc.h"
+#include "logger.h"
 
 #include <iostream>
 #include <chrono>
@@ -19,7 +20,7 @@ static std::atomic<bool> g_should_exit{false};
 static void signal_handler(int sig)
 {
 	g_should_exit = true;
-	std::cerr << "\n[Main] Received signal " << sig << ", exiting...\n";
+	LOG(MOD_MAIN, LOG_WARN) << "\nReceived signal " << sig << ", exiting...\n";
 }
 
 static inline int64_t now_us()
@@ -46,6 +47,7 @@ struct Args
 	int  post_workers = 1;
 	int  queue_cap    = 16;
 	float conf        = 0.45f;
+	int  debug        = -1;   // -G/--DEBUG：-1 表示未指定（默认全模块）
 	bool use_v4l2     = true;
 	bool show_fps     = true;
 	rknn_core_mask npu_mask = RKNN_NPU_CORE_AUTO;
@@ -56,7 +58,7 @@ struct Args
 // ============================================================================
 void print_usage(const char* prog)
 {
-	std::cerr << "Usage: " << prog << " [options]\n"
+	LOG(MOD_MAIN, LOG_INFO) << "Usage: " << prog << " [options]\n"
 	          << "Options:\n"
 	          << "  -m, --model <path>      RT-DETR RKNN model path (required)\n"
 	          << "  -v, --video <path>      Video file path (default: camera)\n"
@@ -73,6 +75,7 @@ void print_usage(const char* prog)
 	          << "  -q, --queue-cap <n>    Queue capacity (default: 16)\n"
 	          << "  --npu-cores <val>      NPU core mask: auto|0|1|2|0,1|0,1,2 (default: auto)\n"
 	          << "  --opencv                Use OpenCV camera (fallback)\n"
+	          << "  -G, --debug <n>        Log modules: 0=errors+report; 1=[Main]; 2=+[RKNN]; 3=+[Pipeline]; ... 8=all (default: all)\n"
 	          << "  -h, --help              Show this help\n";
 }
 
@@ -88,7 +91,7 @@ bool parse_args(int argc, char** argv, Args& args)
 		{
 			if (i + 1 >= argc)
 			{
-				std::cerr << "Error: " << name << " requires a value\n";
+				LOG(MOD_MAIN, LOG_ERROR) << "Error: " << name << " requires a value\n";
 				exit(1);
 			}
 			return argv[++i];
@@ -179,7 +182,7 @@ bool parse_args(int argc, char** argv, Args& args)
 			}
 			else
 			{
-				std::cerr << "Invalid --npu-cores value: " << val << "\n";
+				LOG(MOD_MAIN, LOG_ERROR) << "Invalid --npu-cores value: " << val << "\n";
 				return false;
 			}
 		}
@@ -187,22 +190,26 @@ bool parse_args(int argc, char** argv, Args& args)
 		{
 			args.use_v4l2 = false;
 		}
+		else if (arg == "-G" || arg == "--debug")
+		{
+			args.debug = std::stoi(get_val("debug"));
+		}
 		else
 		{
-			std::cerr << "Unknown option: " << arg << "\n";
+			LOG(MOD_MAIN, LOG_INFO) << "Unknown option: " << arg << "\n";
 			print_usage(argv[0]);
 			return false;
 		}
 	}
 	if (args.model_path.empty())
 	{
-		std::cerr << "Error: model path is required\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Error: model path is required\n";
 		print_usage(argv[0]);
 		return false;
 	}
 	if (!args.image_path.empty() && !args.video_path.empty())
 	{
-		std::cerr << "Error: -i/--image and -v/--video are mutually exclusive\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Error: -i/--image and -v/--video are mutually exclusive\n";
 		return false;
 	}
 	return true;
@@ -216,7 +223,7 @@ int run_image_mode(const Args& args, PipelineManager& pipeline)
 	cv::Mat img = cv::imread(args.image_path, cv::IMREAD_COLOR);
 	if (img.empty())
 	{
-		std::cerr << "[Main] Failed to load image: " << args.image_path << "\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to load image: " << args.image_path << "\n";
 		return 1;
 	}
 
@@ -224,7 +231,7 @@ int run_image_mode(const Args& args, PipelineManager& pipeline)
 	cv::Mat out;
 	if (!pipeline.detect_image(img, out))
 	{
-		std::cerr << "[Main] detect_image failed\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "detect_image failed\n";
 		return 1;
 	}
 	int64_t dt_us = now_us() - t0;
@@ -232,11 +239,11 @@ int run_image_mode(const Args& args, PipelineManager& pipeline)
 	std::string out_path = args.output_path.empty() ? "out_detect.jpg" : args.output_path;
 	if (!cv::imwrite(out_path, out))
 	{
-		std::cerr << "[Main] Failed to write output image: " << out_path << "\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to write output image: " << out_path << "\n";
 		return 1;
 	}
 
-	std::cerr << "[Main] Image detection done: " << out_path
+	LOG(MOD_MAIN, LOG_INFO) << "Image detection done: " << out_path
 	          << " (e2e " << dt_us / 1000.0 << " ms)\n";
 	return 0;
 }
@@ -249,19 +256,19 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
 	V4l2ZeroCopyCapture cap;
 	if (!cap.open(args.device, args.width, args.height, args.fps))
 	{
-		std::cerr << "[Main] Failed to open V4L2 device: " << args.device << "\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to open V4L2 device: " << args.device << "\n";
 		return 1;
 	}
 	if (!cap.start())
 	{
-		std::cerr << "[Main] Failed to start V4L2 stream\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to start V4L2 stream\n";
 		return 1;
 	}
 
 	// 获取实际尺寸并设置源 DMA 池
 	int actual_w = cap.width();
 	int actual_h = cap.height();
-	std::cerr << "[Main] V4L2 actual resolution: " << actual_w << "x" << actual_h << "\n";
+	LOG(MOD_MAIN, LOG_INFO) << "V4L2 actual resolution: " << actual_w << "x" << actual_h << "\n";
 	rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
 
 	// 如果指定了输出视频，设置输出（使用args.fps）
@@ -270,7 +277,7 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
 		pipeline.set_video_output(args.output_path, args.fps);
 	}
 
-	std::cerr << "[Main] V4L2 capture started: "
+	LOG(MOD_MAIN, LOG_INFO) << "V4L2 capture started: "
 	          << cap.width() << "x" << cap.height() << "\n";
 
 	int frame_id = 0;
@@ -279,7 +286,7 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
 		DmaBufferPtr src_buf = cap.read_frame();
 		if (!src_buf)
 		{
-			std::cerr << "[Main] V4L2 read_frame failed, retrying...\n";
+			LOG(MOD_MAIN, LOG_ERROR) << "V4L2 read_frame failed, retrying...\n";
 			continue;
 		}
 		pipeline.push_dma_frame(frame_id++, src_buf);
@@ -298,7 +305,7 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 	cv::VideoCapture cap(args.video_path);
 	if (!cap.isOpened())
 	{
-		std::cerr << "[Main] Failed to open video: " << args.video_path << "\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to open video: " << args.video_path << "\n";
 		return 1;
 	}
 
@@ -308,7 +315,7 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 
 	int actual_w = (int)cap.get(cv::CAP_PROP_FRAME_WIDTH);
 	int actual_h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
-	std::cerr << "[Main] Video resolution: " << actual_w << "x" << actual_h << "\n";
+	LOG(MOD_MAIN, LOG_INFO) << "Video resolution: " << actual_w << "x" << actual_h << "\n";
 
 	if (!args.output_path.empty())
 	{
@@ -334,7 +341,7 @@ int run_opencv_camera_mode(const Args& args, PipelineManager& pipeline)
 	cv::VideoCapture cap(args.device, cv::CAP_V4L2);
 	if (!cap.isOpened())
 	{
-		std::cerr << "[Main] Failed to open camera: " << args.device << "\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to open camera: " << args.device << "\n";
 		return 1;
 	}
 	cap.set(cv::CAP_PROP_FRAME_WIDTH, args.width);
@@ -345,12 +352,12 @@ int run_opencv_camera_mode(const Args& args, PipelineManager& pipeline)
 	cv::Mat first_frame;
 	if (!cap.read(first_frame))
 	{
-		std::cerr << "[Main] Failed to read first frame from camera\n";
+		LOG(MOD_MAIN, LOG_ERROR) << "Failed to read first frame from camera\n";
 		return 1;
 	}
 	int actual_w = first_frame.cols;
 	int actual_h = first_frame.rows;
-	std::cerr << "[Main] Camera actual resolution: " << actual_w << "x" << actual_h << "\n";
+	LOG(MOD_MAIN, LOG_INFO) << "Camera actual resolution: " << actual_w << "x" << actual_h << "\n";
 
 	if (!args.output_path.empty())
 	{
@@ -375,6 +382,15 @@ int main(int argc, char** argv)
 {
 	Args args;
 	if (!parse_args(argc, argv, args)) return 1;
+
+	// 应用 -G/--DEBUG 日志模块配置（-G 0=仅错误；-G N=前 N 个模块；默认全开）
+	if (args.debug >= 0)
+	{
+		int mask = 0;
+		int n = args.debug > MOD_COUNT ? MOD_COUNT : args.debug;
+		for (int i = 0; i < n; ++i) mask |= (1 << i);
+		log_set_modules(mask);
+	}
 
 	signal(SIGINT, signal_handler);
 	signal(SIGTERM, signal_handler);

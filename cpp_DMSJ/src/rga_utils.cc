@@ -1,4 +1,5 @@
 #include "rga_utils.h"
+#include "logger.h"
 
 #include <iostream>
 #include <cstring>
@@ -31,12 +32,12 @@ bool RgaPreprocessor::init(size_t pool_capacity)
 	IM_STATUS init_status = imcheckHeader(RGA_CURRENT_API_HEADER_VERSION);
 	if (init_status != IM_STATUS_NOERROR)
 	{
-		std::cerr << "[RGA] imcheckHeader returned " << init_status
+		LOG(MOD_RGA, LOG_INFO) << "imcheckHeader returned " << init_status
 		          << ", but continuing (may cause issues)\n";
 	}
 	else
 	{
-		std::cerr << "[RGA] RGA initialized, API version "
+		LOG(MOD_RGA, LOG_INFO) << "RGA initialized, API version "
 		          << RGA_API_VERSION << "\n";
 	}
 
@@ -45,7 +46,7 @@ bool RgaPreprocessor::init(size_t pool_capacity)
 
 	src_pool_ = nullptr;
 	inited_ = true;
-	std::cerr << "[RGA] Preprocessor initialized, dst pool capacity="
+	LOG(MOD_RGA, LOG_INFO) << "Preprocessor initialized, dst pool capacity="
 	          << pool_capacity << "\n";
 	return true;
 }
@@ -65,14 +66,14 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 {
 	if (!inited_ || !src_buf)
 	{
-		std::cerr << "[RGA] preprocess_dma_to_dma: not initialized or null src\n";
+		LOG(MOD_RGA, LOG_ERROR) << "preprocess_dma_to_dma: not initialized or null src\n";
 		return nullptr;
 	}
 
 	DmaBufferPtr dst = dst_pool_->alloc();
 	if (!dst)
 	{
-		std::cerr << "[RGA] dst pool alloc failed\n";
+		LOG(MOD_RGA, LOG_ERROR) << "dst pool alloc failed\n";
 		return nullptr;
 	}
 
@@ -90,7 +91,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 	                                      src_buf->format);
 	        if (src_rga.vir_addr != nullptr || src_rga.fd > 0) {
 	            src_ok = true;
-	            std::cerr << "[RGA] Method1 src OK\n";
+	            LOG(MOD_RGA, LOG_INFO) << "Method1 src OK\n";
 	        } else {
 	            releasebuffer_handle(src_handle);
 	        }
@@ -119,13 +120,13 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 		if (src_rga.vir_addr != nullptr)
 		{
 			src_ok = true;
-			std::cerr << "[RGA] Method3 src OK\n";
+			LOG(MOD_RGA, LOG_INFO) << "Method3 src OK\n";
 		}
 	}
 
 	if (!src_ok)
 	{
-		std::cerr << "[RGA] All src wrapping methods failed\n";
+		LOG(MOD_RGA, LOG_ERROR) << "All src wrapping methods failed\n";
 		return nullptr;
 	}
 
@@ -141,7 +142,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 	                                      dst_format);
 	        if (dst_rga.vir_addr != nullptr || dst_rga.fd > 0) {
 	            dst_ok = true;
-	            std::cerr << "[RGA] Method1 dst OK\n";
+	            LOG(MOD_RGA, LOG_INFO) << "Method1 dst OK\n";
 	        } else {
 	            releasebuffer_handle(dst_handle);
 	        }
@@ -170,13 +171,13 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 		if (dst_rga.vir_addr != nullptr)
 		{
 			dst_ok = true;
-			std::cerr << "[RGA] Method3 dst OK\n";
+			LOG(MOD_RGA, LOG_INFO) << "Method3 dst OK\n";
 		}
 	}
 
 	if (!dst_ok)
 	{
-		std::cerr << "[RGA] All dst wrapping methods failed\n";
+		LOG(MOD_RGA, LOG_ERROR) << "All dst wrapping methods failed\n";
 		return nullptr;
 	}
 
@@ -184,7 +185,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 	IM_STATUS status = imresize(src_rga, dst_rga);
 	if (status != IM_STATUS_SUCCESS)
 	{
-		std::cerr << "[RGA] imresize failed: " << status << "\n";
+		LOG(MOD_RGA, LOG_ERROR) << "imresize failed: " << status << "\n";
 		return nullptr;
 	}
 
@@ -192,7 +193,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 	status = imcvtcolor(dst_rga, dst_rga, RK_FORMAT_BGR_888, RK_FORMAT_RGB_888);
 	if (status != IM_STATUS_SUCCESS)
 	{
-		std::cerr << "[RGA] imcvtcolor failed: " << status << "\n";
+		LOG(MOD_RGA, LOG_ERROR) << "imcvtcolor failed: " << status << "\n";
 		return nullptr;
 	}
 
@@ -210,7 +211,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_mat_to_dma(const cv::Mat& src)
 {
 	if (!inited_ || src.empty())
 	{
-		std::cerr << "[RGA] preprocess_mat_to_dma: not initialized or empty src\n";
+		LOG(MOD_RGA, LOG_ERROR) << "preprocess_mat_to_dma: not initialized or empty src\n";
 		return nullptr;
 	}
 
@@ -227,7 +228,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_mat_to_dma(const cv::Mat& src)
 	DmaBufferPtr dst = dst_pool_->alloc();
 	if (!dst)
 	{
-		std::cerr << "[RGA] dst pool alloc failed\n";
+		LOG(MOD_RGA, LOG_ERROR) << "dst pool alloc failed\n";
 		return nullptr;
 	}
 
@@ -258,7 +259,7 @@ DmaBufferPtr RgaPreprocessor::bridge_mat_to_dma(const cv::Mat& src,
 	DmaBufferPtr dma_buf = src_pool.alloc();
 	if (!dma_buf)
 	{
-		std::cerr << "[RGA] bridge: failed to alloc src DMA buffer\n";
+		LOG(MOD_RGA, LOG_ERROR) << "bridge: failed to alloc src DMA buffer\n";
 		return nullptr;
 	}
 

@@ -10,6 +10,7 @@
 #include "../include/rknn_detector.h"
 #include "../include/postprocess.h"
 #include "../include/npu_pipeline.h"
+#include "../include/logger.h"
 
 #include <iostream>
 #include <cassert>
@@ -71,9 +72,9 @@ void test_dma_buffer_alloc()
 	ASSERT_EQ(buf1->height, 640, "height 不匹配");
 
 
-	std::cerr << "buf1->fd = " << buf1->fd << std::endl;
-	std::cerr << "buf1->ptr = " << buf1->ptr << std::endl;
-	std::cerr << "buf1->size = " << buf1->size << std::endl;
+	LOG(MOD_TEST, LOG_INFO) << "buf1->fd = " << buf1->fd << std::endl;
+	LOG(MOD_TEST, LOG_INFO) << "buf1->ptr = " << buf1->ptr << std::endl;
+	LOG(MOD_TEST, LOG_INFO) << "buf1->size = " << buf1->size << std::endl;
 
 	// 测试池复用
 	size_t size_before = pool.size();
@@ -178,19 +179,19 @@ void test_rga_dma_to_dma()
 	ASSERT_TRUE(src_buf != nullptr, "源 DMA 分配失败");
 	/*
 	    // 打印调试信息
-	    std::cerr << "[DEBUG] src_buf->ptr = " << src_buf->ptr << std::endl;
-	    std::cerr << "[DEBUG] src_buf->size = " << src_buf->size << std::endl;
-	    std::cerr << "[DEBUG] src_buf->fd = " << src_buf->fd << std::endl;
-	    std::cerr << "[DEBUG] src_buf->stride = " << src_buf->stride << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "src_buf->ptr = " << src_buf->ptr << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "src_buf->size = " << src_buf->size << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "src_buf->fd = " << src_buf->fd << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "src_buf->stride = " << src_buf->stride << std::endl;
 
 	    // 尝试写入单个字节
-	    std::cerr << "[DEBUG] Attempting to write single byte..." << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "Attempting to write single byte..." << std::endl;
 	    volatile unsigned char* test_ptr = (volatile unsigned char*)src_buf->ptr;
 	    *test_ptr = 0x55;
-	    std::cerr << "[DEBUG] Single byte write succeeded!" << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "Single byte write succeeded!" << std::endl;
 
 	    // 如果单字节写入成功，则进行循环填充
-	    std::cerr << "[DEBUG] Filling entire buffer..." << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "Filling entire buffer..." << std::endl;
 	    unsigned char* data = (unsigned char*)src_buf->ptr;
 	    size_t stride = src_buf->stride;
 	    for (int y = 0; y < 480; ++y) {
@@ -201,7 +202,7 @@ void test_rga_dma_to_dma()
 	            data[idx + 2] = 200;  // R
 	        }
 	    }
-	    std::cerr << "[DEBUG] Fill completed." << std::endl;
+	    LOG(MOD_TEST, LOG_INFO) << "Fill completed." << std::endl;
 	*/
 	// 执行 RGA 预处理
 	DmaBufferPtr dst_buf = rga_preprocessor().preprocess_dma_to_dma(src_buf);
@@ -424,6 +425,31 @@ void test_preprocess_mat_to_dma_correctness()
 }
 
 // ============================================================================
+// 测试 14: 日志等级化模块化控制（uncle-bob 约束：新代码必须配套单元测试）
+// ============================================================================
+void test_logger_modules()
+{
+	TEST("logger 模块级联与级别控制");
+
+	log_set_modules(1 << MOD_MAIN);
+	ASSERT_TRUE(log_enabled(MOD_MAIN, LOG_INFO), "-G1 应开启 Main");
+	ASSERT_TRUE(!log_enabled(MOD_RKNN, LOG_INFO), "-G1 不应开启 RKNN");
+	ASSERT_TRUE(log_enabled(MOD_RKNN, LOG_ERROR), "ERROR 应恒打印");
+
+	log_set_modules((1 << MOD_MAIN) | (1 << MOD_RKNN));
+	ASSERT_TRUE(log_enabled(MOD_RKNN, LOG_INFO), "-G2 应开启 RKNN");
+	ASSERT_TRUE(!log_enabled(MOD_PIPELINE, LOG_INFO), "-G2 不应开启 Pipeline");
+
+	log_set_level(LOG_ERROR);
+	ASSERT_TRUE(!log_enabled(MOD_MAIN, LOG_INFO), "级别 ERROR 时 INFO 不应输出");
+	ASSERT_TRUE(log_enabled(MOD_MAIN, LOG_ERROR), "级别 ERROR 时 ERROR 应输出");
+
+	log_set_level(LOG_INFO);
+	log_set_modules((1 << MOD_COUNT) - 1);
+	PASS();
+}
+
+// ============================================================================
 // 主函数
 // ============================================================================
 int main()
@@ -450,6 +476,7 @@ int main()
 	test_performance_benchmark();
 	test_detect_image_guard();
 	test_preprocess_mat_to_dma_correctness();
+	test_logger_modules();
 
 	std::cout << std::endl;
 	std::cout << "============================================" << std::endl;

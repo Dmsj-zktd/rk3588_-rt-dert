@@ -107,6 +107,7 @@ make -j$(nproc)
 | `-q, --queue-cap`    | 各阶段队列容量                                           | 16                  |
 | `--npu-cores`        | NPU 核心选择：`auto` / `0` / `1` / `2` / `0,1` / `0,1,2` | `auto`              |
 | `--opencv`           | 强制使用 OpenCV 摄像头（回退）                           | 使用 V4L2           |
+| `-G, --debug`        | 日志模块：0=仅错误+报告；1=[Main]；2=+[RKNN]；…；8=全部   | 全部                |
 | `-h, --help`         | 显示帮助                                                 | -                   |
 
 ### 示例
@@ -211,6 +212,11 @@ make -j$(nproc)
     2. RGA DMA→DMA 源 stride 对齐 bug（非对齐宽度输入被逐行偏移污染）→ mat 输入改走 CPU `resize+cvtColor` 紧致 DMA 拷贝。
   - 对照实测（cars.mp4，最佳参数）：CPU 平均 510%→453%，峰值 RSS 2753MB→1527MB，FPS 持平 ~15.7。
   - 遗留：V4L2/相机 DMA→DMA 路径同类 stride 隐患，待任务 3 处理。
+
+- **2026-08-12｜任务 2：日志等级化模块化统一管理**
+  - 新增 `include/logger.h`：模块级联 + 级别（ERROR<WARN<INFO<DEBUG<TRACE）+ `LOG/LOGT/LOGR` 流式宏，替换全项目 106 处散落打印，零缓冲直写 cerr。
+  - 新增 `-G/--DEBUG`：`-G 0` 仅错误+运行报告；`-G N` 开启前 N 个模块（1=Main，2=+RKNN，3=+Pipeline，…，8=全部）；默认全部开启，ERROR 恒打印。
+  - 单测 14/14；FPS 无回归（performance 下 15.53 vs 基线 15.68）。
 
 ---
 
