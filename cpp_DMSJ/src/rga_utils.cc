@@ -4,9 +4,14 @@
 #include <iostream>
 #include <cstring>
 #include <chrono>
+#include <mutex>
 
 // 声明全局性能计数器（定义在 npu_pipeline.cc 中）
 extern PerfCounter g_perf;
+
+// RGA 调用互斥锁：librga 2.2 在并发调用（如 -p 2 预处理线程）下偶发
+// "RGA_BLIT fail: Invalid argument"，串行化 RGA 硬件调用可根治（pre 非瓶颈）。
+static std::mutex g_rga_mutex;
 
 // ============================================================================
 // RGA
@@ -69,6 +74,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 		LOG(MOD_RGA, LOG_ERROR) << "preprocess_dma_to_dma: not initialized or null src\n";
 		return nullptr;
 	}
+	std::lock_guard<std::mutex> lock(g_rga_mutex);
 
 	DmaBufferPtr dst = dst_pool_->alloc();
 	if (!dst)
@@ -259,6 +265,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_mat_to_dma(const cv::Mat& src)
 	//   同时规避 DRM 源缓冲 stride 对齐污染问题（非对齐宽度如 1360→4096）。
 	if (src.isContinuous())
 	{
+		std::lock_guard<std::mutex> lock(g_rga_mutex);
 		DmaBufferPtr dst = dst_pool_->alloc();
 		if (dst)
 		{

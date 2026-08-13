@@ -11,10 +11,12 @@
 #include "../include/postprocess.h"
 #include "../include/npu_pipeline.h"
 #include "../include/logger.h"
+#include "../include/gst_io.h"
 
 #include <iostream>
 #include <cassert>
 #include <cstring>
+#include <cstdio>
 #include <chrono>
 
 #include <rga.h>
@@ -511,6 +513,112 @@ void test_logger_modules()
 }
 
 // ============================================================================
+// 测试 16: GStreamer MPP 硬件编码写入（uncle-bob：新代码配套测试）
+// ============================================================================
+void test_gst_video_writer()
+{
+	TEST("GstVideoWriter 硬编(H.264)");
+
+	const char* out_path = "/home/neardi/Workspace_Codex/rk3588_-rt-detr/cpp_DMSJ/build/ut_gst_out.mp4";
+	GstVideoWriter writer;
+	ASSERT_TRUE(writer.open(out_path, 30.0, cv::Size(320, 240)), "GstVideoWriter open 失败");
+
+	cv::Mat frame(240, 320, CV_8UC3, cv::Scalar(90, 140, 200));
+	for (int i = 0; i < 5; ++i)
+	{
+		ASSERT_TRUE(writer.write(frame), "GstVideoWriter write 失败");
+	}
+	writer.release();
+
+	FILE* fp = fopen(out_path, "rb");
+	ASSERT_TRUE(fp != nullptr, "输出文件不存在");
+	fseek(fp, 0, SEEK_END);
+	long sz = ftell(fp);
+	fclose(fp);
+	ASSERT_TRUE(sz > 0, "输出文件为空");
+	LOG(MOD_TEST, LOG_INFO) << "H.264 output size=" << sz << "\n";
+
+	PASS();
+}
+
+// ============================================================================
+// 测试 17: GStreamer MPP 硬件解码读取
+// ============================================================================
+void test_gst_video_reader()
+{
+	TEST("GstVideoReader 硬解(cars_2s)");
+
+	GstVideoReader reader;
+	ASSERT_TRUE(reader.open("/home/neardi/Workspace_Codex/img/cars_2s.mp4"), "GstVideoReader open 失败");
+	cv::Mat frame;
+	int count = 0;
+	while (count < 10 && reader.read(frame))
+	{
+		ASSERT_TRUE(!frame.empty(), "读到空帧");
+		count++;
+	}
+	ASSERT_TRUE(count > 0, "未读到任何帧");
+	LOG(MOD_TEST, LOG_INFO) << "decoded frames=" << count
+	          << " fps=" << reader.fps()
+	          << " dims=" << frame.cols << "x" << frame.rows << "\n";
+	reader.release();
+
+	PASS();
+}
+
+// ============================================================================
+// 测试 18: GStreamer MPP JPEG 硬解（图片输入）
+// ============================================================================
+void test_gst_image_decode()
+{
+	TEST("GstVideoReader JPEG 硬解(uav.jpg)");
+
+	GstVideoReader reader;
+	ASSERT_TRUE(reader.open("/home/neardi/Workspace_Codex/img/uav.jpg"), "JPEG open 失败");
+	cv::Mat frame;
+	ASSERT_TRUE(reader.read(frame), "JPEG 读帧失败");
+	LOG(MOD_TEST, LOG_INFO) << "JPEG dims=" << frame.cols << "x" << frame.rows << "\n";
+	ASSERT_TRUE(frame.cols == 1360, "宽度应为 1360");
+	ASSERT_TRUE(frame.rows >= 765 && frame.rows <= 768, "高度应为 765~768（硬件对齐）");
+	reader.release();
+
+	PASS();
+}
+
+// ============================================================================
+// 测试 19: GStreamer 1080p 解码无顶部绿条（回归：高度对齐 1080→1088 的 UV 偏移）
+// ============================================================================
+void test_gst_1080p_no_green_bar()
+{
+	TEST("GstVideoReader 1080p 无顶部绿条");
+
+	GstVideoReader reader;
+	ASSERT_TRUE(reader.open("/home/neardi/Workspace_Codex/img/test_people_small_little_18s.mp4"),
+	            "1080p open 失败");
+	cv::Mat frame;
+	ASSERT_TRUE(reader.read(frame), "1080p 读帧失败");
+	ASSERT_TRUE(frame.cols == 1920 && frame.rows == 1080, "尺寸应为 1920x1080");
+
+	// 顶部 20 行绿色像素占比应 < 10%
+	int green = 0;
+	int total = 0;
+	for (int y = 0; y < 20; ++y)
+	{
+		for (int x = 0; x < frame.cols; ++x)
+		{
+			cv::Vec3b p = frame.at<cv::Vec3b>(y, x);
+			total++;
+			if (p[1] > 150 && p[0] < 100 && p[2] < 100) green++;
+		}
+	}
+	LOG(MOD_TEST, LOG_INFO) << "top20 green_ratio=" << (double)green / total << "\n";
+	ASSERT_TRUE((double)green / total < 0.1, "顶部出现绿色伪影（UV 偏移回归）");
+
+	reader.release();
+	PASS();
+}
+
+// ============================================================================
 // 主函数
 // ============================================================================
 int main()
@@ -539,6 +647,10 @@ int main()
 	test_preprocess_mat_to_dma_correctness();
 	test_dma_to_dma_stride_safe();
 	test_logger_modules();
+	test_gst_video_writer();
+	test_gst_video_reader();
+	test_gst_image_decode();
+	test_gst_1080p_no_green_bar();
 
 	std::cout << std::endl;
 	std::cout << "============================================" << std::endl;

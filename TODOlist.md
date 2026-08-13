@@ -10,7 +10,7 @@
 | 1 | 图片输入检测：支持单张图片输入，输出绘制检测框与类别标识的图片 | **已完成并上传入库** | 2026-08-12 | 含"原版可检、workspace 不可检"一致性 bug 修复 |
 | 2 | 调试日志等级化、模块化统一管理（`-G/--DEBUG`），替换散落打印 | **已完成** | 2026-08-12 | 待用户确认上传 |
 | 3 | RGA_DMA 链路分析 + 迭代优化（指标：降低 CPU/内存占用） | **已完成（迭代 1+2）** | 2026-08-12 | 待用户确认上传 |
-| 4 | GStreamer + RK MPP 硬解/硬编替代 OpenCV+FFmpeg 软解/软编 | 待开始 | - | 依赖任务 3 |
+| 4 | GStreamer + RK MPP 硬解/硬编替代 OpenCV+FFmpeg 软解/软编 | **已完成（迭代 1+2）** | 2026-08-13 | 待用户确认上传 |
 | 5 | 预处理/后处理进一步提速（排除 NPU 时长） | 待开始 | - | 依赖任务 4 |
 
 ## 进度记录（动态更新）
@@ -31,3 +31,6 @@
 - 任务 3 迭代 2（2026-08-12）：相机 DMA→DMA stride 安全化（wstride=实际 stride/bpp，非整除走 CPU 回退）+ 模拟测试（单测 15/15）；worker 配置实测：`-n 8` 甜点位（内存 953MB/-36%、CPU 365%/-15%、FPS 15.31/-3%）vs `-n 14`（1500MB/430%/15.82）。
 - 待用户决策：任务 3 是否上传入库/同步本地。
 - 任务 4~5 规划完成，待任务 3 收尾后按顺序启动。
+- 任务 4 启动（2026-08-12）：板端 GStreamer 1.22.9 + rockchipmpp 插件就绪（mppvideodec 硬解 NV12 / mpph264enc 硬编支持 BGR）；方案：新增 gst_io（GstVideoReader/Writer）→ 视频读取/输出走 MPP 硬解硬编，保留 OpenCV 回退；编码端因 mpph264enc 原生支持 BGR 可省 videoconvert。
+- 任务 4 完成（2026-08-12）：视频 H.264 硬解（NV12 直拉 + OpenCV cvtColor 转 BGR，规避 videoconvert 60ms/帧瓶颈）+ H.264 硬编（BGR 直送）+ JPEG 硬解（mppjpegdec）；CPU -10~12%、RSS -13~34MB、FPS 持平略升、后处理 ~40→3ms；单测 18/18。
+- 任务 4 迭代 2（2026-08-13）：修复 1080p 顶部绿条（mpp 高度对齐 1080→1088 导致 UV 平面偏移，用 GstVideoMeta 真实 offset/stride 组装）+ 禁用 AFBC；修复 RGA 并发偶发 Invalid argument（互斥锁）；1080p 实测 FPS 15.15/CPU 360%/RSS 1127MB，rga_fail=0，单测 19/19。

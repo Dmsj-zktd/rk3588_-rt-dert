@@ -119,3 +119,28 @@
 | 14（最佳性能基准） | 430% | 1500 MB | 15.82 | - |
 
 > 用户决策（2026-08-12）：`-n 8` 正式列为"显著降 CPU/内存甜点位"基准，`-n 14` 继续作为"最佳性能（最高 FPS）"基准，均已写入 AGENTS.md。
+
+## 任务 4：GStreamer + RK MPP 硬解/硬编（2026-08-12）
+
+### 实现
+- 新增 `gst_io.{h,cc}`：`GstVideoReader`（视频 `qtdemux→h264parse→mppvideodec`、图片 JPEG `jpegparse→mppjpegdec`、PNG 软解）与 `GstVideoWriter`（`appsrc(BGR)→mpph264enc→h264parse→mp4mux`）。
+- 关键发现：`videoconvert` 转 BGR 在 720p 上实测 ~60ms/帧（纯瓶颈）；改为 appsink 直拉 NV12 + OpenCV NEON `cvtColor` 转 BGR（~1.5ms/帧），解码保持纯硬件。
+- `mpph264enc` 原生支持 BGR 输入 → 编码端无需 videoconvert；视频输出从 mp4v 软编改为 H.264 硬编。
+- 全部保留 OpenCV 回退（reader/图片解码失败自动降级）。
+
+### 指标对比（cars.mp4，performance 模式；软=OpenCV/FFmpeg，硬=MPP）
+
+| 配置 | 解码/编码 | 平均 CPU | 峰值 RSS | 整体 FPS | 后处理均值 |
+|------|-----------|----------|----------|----------|------------|
+| -n 8 软 | OpenCV/ffmpeg | 365% | 953 MB | 15.30 | ~37ms |
+| **-n 8 硬** | **MPP** | **322%** | **919 MB** | **15.40** | **3.2ms** |
+| -n 14 软 | OpenCV/ffmpeg | 430% | 1500 MB | 15.82 | ~45ms |
+| **-n 14 硬** | **MPP** | **386%** | **1487 MB** | **15.86** | **3.6ms** |
+
+> 结论：硬解硬编后 CPU -10~12%、内存 -13~34MB、FPS 持平略升；后处理（含软编）从 ~40ms 降至 ~3ms（编码已卸载到硬件）。图片 JPEG 硬解验证：uav.jpg 检出 38 目标（与软解一致）。单测 18/18。
+
+### 任务 4 迭代 2：1080p 绿条与 RGA 并发错误修复（2026-08-13）
+
+- **问题 1（顶部绿/紫条）**：mppvideodec 把 1080p 高度按 16 对齐输出为 **1088 行 NV12**（缓冲区 3133440 字节），但 caps 只报 height=1080；此前按 1080 找 UV 平面，把 Y 平面 8 行当色度 → 顶部 16 行绿条。修复：`gst_buffer_get_video_meta` 读取真实 `offset[]/stride[]` 组装紧凑 NV12（无 meta 时按缓冲区大小推断）；并加 `mppvideodec arm-afbc=false` 禁用 AFBC 压缩输出。验证：读取帧与输出视频顶部绿条清零（与源内容一致）。
+- **问题 2（RGA_BLIT fail: Invalid argument）**：`preprocess_mat_to_dma` 中 640×640 原地 `imcvtcolor` 在 `-p 2` 并发下偶发失败（-p 1 时 0 次）。修复：RGA 调用加全局互斥锁串行化。验证：1080p 全片 rga_fail=0。
+- 1080p 实测（test_people_small_little_18s，-n 8，performance）：FPS **15.15**、CPU **360%**、RSS **1127MB**、pre 8.5ms、post 7.7ms、19 目标/帧。单测 **19/19**（新增 1080p 无绿条回归测试）。

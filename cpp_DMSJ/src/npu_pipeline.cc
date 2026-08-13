@@ -306,8 +306,7 @@ void PipelineManager::worker_postprocess()
 			if (!video_initialized_ && !bundle->orig_img.empty())
 			{
 				cv::Size frame_size = bundle->orig_img.size();
-				int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
-				if (video_writer_.open(video_output_path_, fourcc, video_fps_, frame_size))
+				if (video_writer_.open(video_output_path_, video_fps_, frame_size))
 				{
 					video_initialized_ = true;
 					LOG(MOD_PIPELINE, LOG_INFO) << "VideoWriter opened: "
@@ -390,8 +389,7 @@ void PipelineManager::flush_video_buffer()
 	if (!video_initialized_ || !video_writer_.isOpened())
 	{
 		cv::Size frame_size = frame_buffer_.begin()->second->orig_img.size();
-		int fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
-		if (video_writer_.open(video_output_path_, fourcc, video_fps_, frame_size))
+		if (video_writer_.open(video_output_path_, video_fps_, frame_size))
 		{
 			video_initialized_ = true;
 			LOG(MOD_PIPELINE, LOG_INFO) << "VideoWriter opened during flush.\n";

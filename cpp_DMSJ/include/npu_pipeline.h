@@ -14,6 +14,7 @@
 #include "types.h"
 #include "rknn_detector.h"
 #include "rknn_api.h"
+#include "gst_io.h"
 
 // ============================================================================
 // BoundedSafeQueue（有界阻塞队列）
@@ -119,7 +120,7 @@ class PipelineManager
 		std::string       video_output_path_;
 		double            video_fps_ = 30.0;
 		bool              video_initialized_ = false;
-		cv::VideoWriter   video_writer_;
+		GstVideoWriter    video_writer_;
 		std::map<int, FrameBundlePtr> frame_buffer_;   // 缓存未按序写入的帧
 		int               next_write_frame_id_ = 0;     // 期望写入的下一个帧 ID
 		std::mutex        writer_mtx_;
