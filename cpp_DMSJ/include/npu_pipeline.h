@@ -111,6 +111,9 @@ class PipelineManager
 		std::vector<std::thread> workers_post_;
 
 		std::atomic<bool> is_running_{true};
+		// 【健壮性】NPU worker 初始化失败熔断：全部失败时输入直接丢帧，避免队列卡死
+		std::atomic<bool> workers_ok_{true};
+		std::atomic<int>  npu_init_failures_{0};
 		std::string       model_path_;
 		int               num_npu_workers_;
 		float             conf_thres_ = 0.45f;

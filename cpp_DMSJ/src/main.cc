@@ -336,6 +336,9 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 			gst_reader.release();
 			return 1;
 		}
+		// 预读第二帧，让读取器通过 PTS 估算真实帧率（容器元数据缺失时，如 60fps 录屏）
+		cv::Mat frame2;
+		bool has_second = gst_reader.read(frame2);
 		fps = gst_reader.fps();
 		actual_w = frame.cols;
 		actual_h = frame.rows;
@@ -346,9 +349,13 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 			pipeline.set_video_output(args.output_path, fps);
 		}
 		pipeline.push_image(frame_id++, frame);
-		while (!g_should_exit && gst_reader.read(frame))
+		if (has_second)
 		{
-			pipeline.push_image(frame_id++, frame);
+			pipeline.push_image(frame_id++, frame2);
+			while (!g_should_exit && gst_reader.read(frame))
+			{
+				pipeline.push_image(frame_id++, frame);
+			}
 		}
 		gst_reader.release();
 	}

@@ -36,6 +36,10 @@ struct GstVideoReader::Impl
 	int         width       = 0;
 	int         height      = 0;
 	bool        opened      = false;
+	guint64     prev_pts    = 0;
+	bool        have_prev_pts = false;
+	// 【任务 4 迭代 4】PTS 间隔众数直方图（VFR 视频用众数估计帧率，抗单帧抖动）
+	int         pts_hist[241] = {0};
 };
 
 GstVideoReader::GstVideoReader() : impl_(new Impl()) {}
@@ -46,57 +50,115 @@ bool GstVideoReader::open(const std::string& path)
 	ensure_gst_init();
 	release();
 
-	// 注意：不用 videoconvert 转 BGR（实测 720p 软转换 ~60ms/帧，成为瓶颈）；
-	// 直接拉 NV12/BGR 原始帧，用 OpenCV NEON 版 cvtColor 转 BGR（~1.5ms/帧）。
 	std::string ext = path.substr(path.find_last_of('.') + 1);
 	for (auto& c : ext) c = (char)tolower((unsigned char)c);
-	std::string desc;
+
+	// 【任务 4 迭代 3】按扩展名选择候选链路（容器 + 编解码；H.264 失败自动重试 H.265）
+	std::vector<std::string> candidates;
+	const std::string src = "filesrc location=\"" + path + "\" ! ";
 	if (ext == "jpg" || ext == "jpeg")
 	{
-		// 图片：MPP JPEG 硬件解码
-		desc = "filesrc location=\"" + path + "\" ! jpegparse ! mppjpegdec ! appsink name=sink";
+		// 图片为单帧：不探测（探测会消费掉唯一一帧）
+		if (try_start_pipeline(src + "jpegparse ! mppjpegdec ! appsink name=sink", false))
+		{
+			impl_->opened = true;
+			return true;
+		}
 	}
 	else if (ext == "png")
 	{
-		desc = "filesrc location=\"" + path + "\" ! pngdec ! appsink name=sink";
+		if (try_start_pipeline(src + "pngdec ! appsink name=sink", false))
+		{
+			impl_->opened = true;
+			return true;
+		}
+	}
+	else if (ext == "bmp")
+	{
+		if (try_start_pipeline(src + "bmpdec ! appsink name=sink", false))
+		{
+			impl_->opened = true;
+			return true;
+		}
+	}
+	else if (ext == "webp")
+	{
+		if (try_start_pipeline(src + "webpdec ! appsink name=sink", false))
+		{
+			impl_->opened = true;
+			return true;
+		}
+	}
+	else if (ext == "hevc" || ext == "h265" || ext == "265")
+	{
+		candidates.push_back(src + "h265parse ! mppvideodec arm-afbc=false ! appsink name=sink");
+		candidates.push_back(src + "qtdemux ! h265parse ! mppvideodec arm-afbc=false ! appsink name=sink");
+	}
+	else if (ext == "h264" || ext == "264")
+	{
+		candidates.push_back(src + "h264parse ! mppvideodec arm-afbc=false ! appsink name=sink");
 	}
 	else
 	{
-		// 视频：MPP H.264 硬件解码
-		// arm-afbc=false：禁用 AFBC 压缩输出（否则按线性 NV12 读取会出现顶部绿/紫条）
-		desc = "filesrc location=\"" + path
-		       + "\" ! qtdemux ! h264parse ! mppvideodec arm-afbc=false ! appsink name=sink";
+		std::string demuxer = "qtdemux";
+		if (ext == "avi") demuxer = "avidemux";
+		else if (ext == "mkv" || ext == "webm") demuxer = "matroskademux";
+		else if (ext == "ts" || ext == "m2ts") demuxer = "tsdemux";
+		std::string head = src + demuxer + " ! ";
+		candidates.push_back(head + "h264parse ! mppvideodec arm-afbc=false ! appsink name=sink");
+		candidates.push_back(head + "h265parse ! mppvideodec arm-afbc=false ! appsink name=sink");
 	}
+
+	for (const auto& desc : candidates)
+	{
+		if (try_start_pipeline(desc, true))
+		{
+			impl_->opened = true;
+			return true;
+		}
+	}
+	LOG(MOD_PIPELINE, LOG_ERROR) << "GstVideoReader: all pipelines failed for " << path << "\n";
+	return false;
+}
+
+bool GstVideoReader::try_start_pipeline(const std::string& desc, bool verify_frame)
+{
 	GError* err = nullptr;
 	GstElement* pipe = gst_parse_launch(desc.c_str(), &err);
 	if (!pipe)
 	{
-		LOG(MOD_PIPELINE, LOG_ERROR) << "GstVideoReader: parse failed: "
-		          << (err ? err->message : "unknown") << "\n";
 		if (err) g_error_free(err);
 		return false;
 	}
-
 	GstElement* sink = gst_bin_get_by_name(GST_BIN(pipe), "sink");
 	if (!sink)
 	{
-		LOG(MOD_PIPELINE, LOG_ERROR) << "GstVideoReader: no appsink\n";
 		gst_object_unref(pipe);
 		return false;
 	}
-
-	impl_->pipeline = pipe;
-	impl_->sink = sink;
-
 	g_object_set(G_OBJECT(sink), "sync", FALSE, "drop", FALSE, "max-buffers", 4, NULL);
-
 	if (gst_element_set_state(pipe, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
 	{
-		LOG(MOD_PIPELINE, LOG_ERROR) << "GstVideoReader: PLAYING failed\n";
-		release();
+		gst_object_unref(sink);
+		gst_object_unref(pipe);
 		return false;
 	}
-	impl_->opened = true;
+	// 数据流验证（仅视频）：候选链路必须实际产出帧才算匹配
+	// （否则 HEVC 流走 h264parse 候选时 PLAYING 也会"成功"但永无帧输出）
+	if (verify_frame)
+	{
+		GstSample* probe = gst_app_sink_try_pull_sample(GST_APP_SINK(sink), 800 * GST_MSECOND);
+		if (!probe)
+		{
+			gst_element_set_state(pipe, GST_STATE_NULL);
+			gst_object_unref(sink);
+			gst_object_unref(pipe);
+			return false;
+		}
+		gst_sample_unref(probe);
+	}
+	impl_->pipeline = pipe;
+	impl_->sink = sink;
 	return true;
 }
 
@@ -137,6 +199,36 @@ bool GstVideoReader::read(cv::Mat& frame)
 		{
 			impl_->fps = (double)fr_n / fr_d;
 		}
+	}
+	// 帧率估算：容器元数据缺失（如 0/1）时用 PTS 间隔众数推算
+	// （VFR 视频 PTS 不规则，取众数比取"最后一帧间隔"更稳）
+	guint64 pts = GST_BUFFER_PTS(buf);
+	if (!GST_CLOCK_TIME_IS_VALID(pts)) pts = GST_BUFFER_DTS(buf);
+	if (GST_CLOCK_TIME_IS_VALID(pts))
+	{
+		if (impl_->have_prev_pts && pts > impl_->prev_pts)
+		{
+			double dt = (double)(pts - impl_->prev_pts) / GST_SECOND;
+			if (dt > 0.001 && dt < 1.0)
+			{
+				double est = 1.0 / dt;
+				int e = (int)(est + 0.5);
+				if (e >= 1 && e <= 240) impl_->pts_hist[e]++;
+				// 众数（全区间扫描 240 次，每帧开销可忽略）
+				int best = 30, bc = 0;
+				for (int i = 1; i <= 240; ++i)
+				{
+					if (impl_->pts_hist[i] > bc)
+					{
+						bc = impl_->pts_hist[i];
+						best = i;
+					}
+				}
+				impl_->fps = best;
+			}
+		}
+		impl_->prev_pts = pts;
+		impl_->have_prev_pts = true;
 	}
 	if (w > 0 && h > 0)
 	{
@@ -228,6 +320,7 @@ void GstVideoReader::release()
 	impl_->opened = false;
 	impl_->width = 0;
 	impl_->height = 0;
+	impl_->have_prev_pts = false;
 }
 
 // ============================================================================
@@ -241,10 +334,22 @@ struct GstVideoWriter::Impl
 	cv::Size    size     = {0, 0};
 	guint64     frame_index = 0;
 	bool        opened   = false;
+	// 【任务 4 迭代 4】编码质量参数
+	std::string rc_mode  = "fixqp";   // 固定 QP：质量优先，避免 CBR 低码率块状模糊
+	int         qp_init  = 26;        // QP 越小越清晰（24~30 为常用清晰区间）
+	std::string profile  = "high";    // CABAC，同码率下画质优于 baseline
 };
 
 GstVideoWriter::GstVideoWriter() : impl_(new Impl()) {}
 GstVideoWriter::~GstVideoWriter() { release(); delete impl_; }
+
+void GstVideoWriter::set_encoder_params(const std::string& rc_mode, int qp_init,
+                                        const std::string& profile)
+{
+	impl_->rc_mode = rc_mode;
+	impl_->qp_init = qp_init;
+	impl_->profile = profile;
+}
 
 bool GstVideoWriter::open(const std::string& path, double fps, cv::Size size)
 {
@@ -255,11 +360,17 @@ bool GstVideoWriter::open(const std::string& path, double fps, cv::Size size)
 	impl_->size = size;
 	impl_->frame_index = 0;
 
+	// 编码码率按分辨率×帧率自适应（VBR/CBR 回退档；fixqp 模式下码率由 QP 决定）
+	guint fps_int = (guint)(impl_->fps + 0.5);
+	guint bps = (guint)((double)size.width * size.height * fps_int * 0.35);
+	if (bps < 2000000) bps = 2000000;
+	if (bps > 20000000) bps = 20000000;
+
 	char desc[1536];
 	snprintf(desc, sizeof(desc),
 	         "appsrc name=src ! video/x-raw,format=BGR,width=%d,height=%d,framerate=%d/1 "
-	         "! mpph264enc ! h264parse ! mp4mux ! filesink location=\"%s\"",
-	         size.width, size.height, (int)(impl_->fps + 0.5), path.c_str());
+	         "! mpph264enc name=enc ! h264parse ! mp4mux ! filesink location=\"%s\"",
+	         size.width, size.height, fps_int, path.c_str());
 
 	GError* err = nullptr;
 	GstElement* pipe = gst_parse_launch(desc, &err);
@@ -281,11 +392,46 @@ bool GstVideoWriter::open(const std::string& path, double fps, cv::Size size)
 	impl_->pipeline = pipe;
 	impl_->src = src;
 
+	GstElement* enc = gst_bin_get_by_name(GST_BIN(pipe), "enc");
+	if (enc)
+	{
+		// profile：high（CABAC）优先，兼容性由调用方保证
+		// 注意：g_object_set 对枚举属性必须传枚举值（int），传字符串会静默失败
+		int profile_val = 0;   // baseline
+		if (impl_->profile == "main") profile_val = 1;
+		else if (impl_->profile == "high") profile_val = 2;
+		if (impl_->profile == "high" || impl_->profile == "main" ||
+		    impl_->profile == "baseline")
+		{
+			g_object_set(G_OBJECT(enc), "profile", profile_val, NULL);
+		}
+		if (impl_->rc_mode == "fixqp")
+		{
+			// 固定 QP：质量恒定、抗复杂纹理块状伪影；bps 自动由 QP 推导
+			g_object_set(G_OBJECT(enc), "rc-mode", 2,
+			             "qp-init", impl_->qp_init, NULL);
+		}
+		else
+		{
+			int rc = (impl_->rc_mode == "vbr") ? 0 : 1;
+			g_object_set(G_OBJECT(enc), "rc-mode", rc,
+			             "bps", bps, "bps-max", bps * 3 / 2, "bps-min", bps / 2, NULL);
+		}
+		LOG(MOD_PIPELINE, LOG_INFO) << "GstVideoWriter encoder: rc="
+		          << impl_->rc_mode << " qp-init=" << impl_->qp_init
+		          << " profile=" << impl_->profile << " bps=" << bps << "\n";
+		gst_object_unref(enc);
+	}
+
+	// 【任务 4 迭代 4】显式声明 BT.709 limited 色彩学：
+	// 否则 mpph264enc 会把 appsrc 默认 sRGB 色彩学直接写进 H.264 VUI
+	// （color_space=gbr / color_range=pc），解码器按错误矩阵还原导致对比度被压。
 	GstCaps* caps = gst_caps_new_simple("video/x-raw",
 	                                    "format", G_TYPE_STRING, "BGR",
 	                                    "width", G_TYPE_INT, size.width,
 	                                    "height", G_TYPE_INT, size.height,
-	                                    "framerate", GST_TYPE_FRACTION, (int)(impl_->fps + 0.5), 1, NULL);
+	                                    "framerate", GST_TYPE_FRACTION, fps_int, 1,
+	                                    "colorimetry", G_TYPE_STRING, "bt709", NULL);
 	g_object_set(G_OBJECT(src), "caps", caps, "is-live", FALSE,
 	             "format", GST_FORMAT_TIME, "stream-type", GST_APP_STREAM_TYPE_STREAM, NULL);
 	gst_caps_unref(caps);

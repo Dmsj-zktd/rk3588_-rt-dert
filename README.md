@@ -17,11 +17,12 @@
 
 - **灵活的输入源**  
   - V4L2 摄像头（/dev/videoX）零拷贝采集  
-  - 本地 MP4 视频文件（通过 OpenCV 解码，桥接至 DMA 内存）  
+  - 本地视频文件（**GStreamer + RK MPP 硬件解码**，支持 mp4/avi/mkv/ts/webm/hevc/h264 等；失败自动回退 OpenCV 软解）  
+  - 本地图片（jpg/jpeg 走 mppjpegdec 硬解，png/bmp/webp 软解，失败回退 OpenCV）  
   - 回退模式：标准 OpenCV 摄像头采集
 
 - **输出视频编码**  
-  支持将检测结果绘制于原图后，使用 OpenCV 编码为 MP4/H.264 视频文件。
+  支持将检测结果绘制于原图后，使用 **GStreamer + RK MPP 硬件编码**（H.264 High profile，恒定质量 fixqp，BT.709 色彩学），替代 OpenCV/FFmpeg 软编。
 
 - **性能监控**  
   自动统计各阶段耗时（预处理、NPU 推理、后处理）及整体 FPS，便于调优。
@@ -40,6 +41,7 @@
 | **DRM 库**   | `libdrm.so`，用于 dumb buffer 分配及 PRIME fd 导出       |
 | **V4L2**     | 内核支持，设备节点 `/dev/video*`                         |
 | **OpenCV**   | 推荐 4.5+，用于视频解码/编码和图像显示                   |
+| **GStreamer**| 1.22+（gstreamer-1.0 / app / video）+ rockchipmpp 插件（mppvideodec/mpph264enc） |
 | **编译工具** | GCC 9+，CMake 3.10+，支持 `-fopenmp`                     |
 
 > **注意**：所有库须为 aarch64 版本（板端运行）或交叉编译环境。
@@ -147,10 +149,10 @@ make -j$(nproc)
 └────────────┘           └────────────┘           └────────────┘           └────────────┘
                                                                                    │
                                                                                    ▼
-                                                                           ┌────────────┐
-                                                                           │ 视频编码   │
-                                                                           │ (OpenCV)   │
-                                                                           └────────────┘
+                                                                          ┌────────────┐
+                                                                          │ 视频编码   │
+                                                                          │ (MPP 硬编) │
+                                                                          └────────────┘
 ```
 
 ### 关键模块说明
@@ -195,9 +197,9 @@ make -j$(nproc)
 | ---------------------------- | -------------- |
 | 预处理（RGA virt→DMA，mat 输入）        | ~ 5.5ms        |
 | NPU 推理（640×640 INT8，3 核饱和）      | ~ 850ms/帧     |
-| 后处理 + 画框                | ~ 45ms         |
-| **整体 FPS**（最佳性能 -p 2 -n 14 -P 3） | **~ 15.8 FPS**（CPU ~430%、RSS ~1500MB） |
-| **整体 FPS**（甜点位 -p 2 -n 8 -P 3）    | **~ 15.3 FPS**（CPU ~365%、RSS ~953MB） |
+| 后处理 + 画框                | ~ 3ms（硬编卸载后） |
+| **整体 FPS**（最佳性能 -p 2 -n 14 -P 3，硬解硬编） | **~ 15.8 FPS**（CPU ~386%、RSS ~1487MB） |
+| **整体 FPS**（甜点位 -p 2 -n 8 -P 3，硬解硬编）    | **~ 15.4 FPS**（CPU ~322%、RSS ~919MB） |
 
 > 以上为一次实测的均值参考，实际性能受模型复杂度、输入分辨率、线程/核心配置及 CPU 调度等影响，请以实际测量为准。
 
@@ -225,6 +227,14 @@ make -j$(nproc)
   - 迭代 1：mat 输入改走 RGA virt→DMA（cv::Mat 连续内存 → 640×640 RGB DMA），消除 CPU resize/cvtColor 与桥接 memcpy，失败回退 CPU；CPU 453%→416%、RSS 1527→1492MB、pre 8.16→5.46ms、FPS 15.53→15.85。
   - 迭代 2：相机 DMA→DMA stride 安全化（wstride=实际 stride/bpp，非整除自动回退 CPU 逐行读取）+ 模拟测试；单测 15/15。
   - 基准参数双档：最佳性能 `-p 2 -n 14 -P 3`（FPS ~15.8 / CPU ~430% / RSS ~1500MB）；甜点位 `-p 2 -n 8 -P 3`（FPS ~15.3 / CPU ~365% / RSS ~953MB）。
+
+- **2026-08-13｜任务 4：GStreamer + RK MPP 硬解/硬编替代软解/软编（迭代 1~4）**
+  - 迭代 1：新增 `include/gst_io.{h,cc}`——`GstVideoReader`（qtdemux→h264parse→mppvideodec 硬解 NV12，OpenCV NEON cvtColor 转 BGR，规避 videoconvert 60ms/帧瓶颈）与 `GstVideoWriter`（appsrc(BGR)→mpph264enc→mp4mux 硬编）；图片 JPEG 走 mppjpegdec 硬解；OpenCV 全链路回退保留。
+  - 迭代 2：修复 1080p 顶部绿条（mpp 高度对齐 1080→1088 的 UV 平面偏移，按 GstVideoMeta 真实 offset/stride 组装 NV12 + 禁用 AFBC）；RGA 并发偶发 `Invalid argument` 用全局互斥锁串行化（实测零开销）。
+  - 迭代 3：修复特殊尺寸视频（480×332@60）慢放（PTS 帧率估算）；多格式支持（avi/mkv/ts/webm/hevc/h264/bmp/webp，H.264→H.265 自动重试 + 800ms 数据流验证）。
+  - 迭代 4：**特殊尺寸“仍模糊”根治**——根因① mpph264enc 把 appsrc 默认 sRGB 色彩学写入 H.264 VUI（`pc/gbr/sRGB`）导致解码对比度损失 ~13%，修复为显式 `colorimetry=bt709`（输出 `tv/bt709`）；根因② 默认 cbr+baseline 低码率块状伪影，修复为默认 **fixqp + qp-init=22 + profile=high**（恒定质量，`set_encoder_params(rc,qp,profile)` 可配置）。PTS 帧率估算改众数统计。
+  - 健壮性：NPU 模型加载失败不再挂起（熔断丢帧 + wait_idle 30s 上限 + 析构先 shutdown 队列），新增回归测试。
+  - 实测（-n 8，performance）：特殊 480×332@60 **15.64 FPS / CPU 328% / RSS 822MB / 8.95Mbps**；720p **15.38 / 333% / 966MB / 4.35Mbps**；1080p **15.02 / 352% / 1148MB / 5.17Mbps**；单测 **21/21**。
 
 ## 🧪 测试与验证
 
@@ -292,8 +302,8 @@ chmod +x test_robustness.sh
 3. **RGA 版本**  
    - 不同 RGA 库对 `wrapbuffer_fd` 的支持可能有差异，建议使用 RK3588 官方 SDK 中的版本。
 
-4. **视频编码性能**  
-   - OpenCV 编码器可能成为瓶颈，如需更高性能可考虑硬件编码器（如 MPP）。
+4. **视频编码**  
+   - 已默认使用 MPP 硬件编码（H.264 High / fixqp22 / BT.709），恒定质量、按内容自适应码率；可通过 `GstVideoWriter::set_encoder_params()` 调整 rc 模式/QP/profile。
 
 5. **内存占用**  
    - 默认 DMA 池容量约为 8+8 个缓冲区（源+目标），每个 640×640×3≈1.2MB，加上 V4L2 缓存，总内存占用 < 100MB。

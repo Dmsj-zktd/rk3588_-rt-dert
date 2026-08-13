@@ -34,6 +34,7 @@ class GstVideoReader
 		void   release();
 
 	private:
+		bool try_start_pipeline(const std::string& desc, bool verify_frame);
 		struct Impl;
 		Impl* impl_;
 };
@@ -54,7 +55,16 @@ class GstVideoWriter
 		bool          write(const cv::Mat& frame);
 		void          release();
 
+		/**
+		 * @brief 配置硬件编码器质量参数（任务 4 迭代 4）。
+		 * @param rc_mode  "fixqp"（固定 QP 质量优先）/ "vbr" / "cbr"
+		 * @param qp_init  rc_mode=fixqp 时的初始 QP（越小越清晰，建议 24~30）
+		 * @param profile  "high"（CABAC，推荐）/ "main" / "baseline"
+		 */
+		void set_encoder_params(const std::string& rc_mode, int qp_init,
+		                        const std::string& profile);
+
 	private:
 		struct Impl;
 		Impl* impl_;
-};
+	};

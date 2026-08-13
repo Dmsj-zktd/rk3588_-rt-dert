@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cstring>
 #include <cstdio>
+#include <cstdlib>
 #include <chrono>
 
 #include <rga.h>
@@ -619,6 +620,60 @@ void test_gst_1080p_no_green_bar()
 }
 
 // ============================================================================
+// 测试 20: 多格式输入（AVI/H.264、MP4/H.265、图片）
+// ============================================================================
+void test_gst_multi_format()
+{
+	TEST("GstVideoReader 多格式(avi/hevc)");
+
+	const char* build = "/home/neardi/Workspace_Codex/rk3588_-rt-detr/cpp_DMSJ/build/";
+	std::string avi = std::string(build) + "ut_multi.avi";
+	std::string hevc = std::string(build) + "ut_multi_hevc.mp4";
+
+	// 用板端 mpp 编码器生成测试文件（不依赖外部素材）
+	std::string cmd_avi = "gst-launch-1.0 -q videotestsrc num-buffers=15 ! videoconvert "
+	                      "! video/x-raw,format=BGR,width=320,height=240 ! mpph264enc ! h264parse "
+	                      "! avimux ! filesink location=" + avi + " 2>/dev/null";
+	std::string cmd_hevc = "gst-launch-1.0 -q videotestsrc num-buffers=15 ! videoconvert "
+	                       "! video/x-raw,format=I420,width=320,height=240 ! mpph265enc ! h265parse "
+	                       "! mp4mux ! filesink location=" + hevc + " 2>/dev/null";
+	system(cmd_avi.c_str());
+	system(cmd_hevc.c_str());
+
+	GstVideoReader r1;
+	ASSERT_TRUE(r1.open(avi), "AVI(H.264) 打开失败");
+	cv::Mat f1;
+	ASSERT_TRUE(r1.read(f1) && !f1.empty(), "AVI 读帧失败");
+	r1.release();
+
+	GstVideoReader r2;
+	ASSERT_TRUE(r2.open(hevc), "HEVC(H.265) 打开失败");
+	cv::Mat f2;
+	ASSERT_TRUE(r2.read(f2) && !f2.empty(), "HEVC 读帧失败");
+	r2.release();
+
+	PASS();
+}
+
+// 测试 21: PipelineManager 模型加载失败不挂起（回归：NPU 初始化失败曾导致
+// reader 阻塞在满队列 / wait_idle 永久等待 / 析构 push 毒丸卡死）
+void test_pipeline_init_failure_no_hang()
+{
+	TEST("PipelineManager 模型加载失败不挂起");
+	auto t0 = steady_clock::now();
+	{
+		PipelineManager pipeline(1, 2, 1, "/nonexistent/model.rknn", 4);
+		cv::Mat f(480, 332, CV_8UC3, cv::Scalar(0, 0, 0));
+		for (int i = 0; i < 100; ++i) pipeline.push_image(i, f);
+		pipeline.wait_idle();
+		// 析构在作用域末尾执行
+	}
+	double sec = duration<double>(steady_clock::now() - t0).count();
+	ASSERT_TRUE(sec < 30.0, "模型加载失败仍挂起超过 30s");
+	PASS();
+}
+
+// ============================================================================
 // 主函数
 // ============================================================================
 int main()
@@ -651,6 +706,8 @@ int main()
 	test_gst_video_reader();
 	test_gst_image_decode();
 	test_gst_1080p_no_green_bar();
+	test_gst_multi_format();
+	test_pipeline_init_failure_no_hang();
 
 	std::cout << std::endl;
 	std::cout << "============================================" << std::endl;

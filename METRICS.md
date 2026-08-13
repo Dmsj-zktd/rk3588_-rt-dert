@@ -144,3 +144,60 @@
 - **问题 1（顶部绿/紫条）**：mppvideodec 把 1080p 高度按 16 对齐输出为 **1088 行 NV12**（缓冲区 3133440 字节），但 caps 只报 height=1080；此前按 1080 找 UV 平面，把 Y 平面 8 行当色度 → 顶部 16 行绿条。修复：`gst_buffer_get_video_meta` 读取真实 `offset[]/stride[]` 组装紧凑 NV12（无 meta 时按缓冲区大小推断）；并加 `mppvideodec arm-afbc=false` 禁用 AFBC 压缩输出。验证：读取帧与输出视频顶部绿条清零（与源内容一致）。
 - **问题 2（RGA_BLIT fail: Invalid argument）**：`preprocess_mat_to_dma` 中 640×640 原地 `imcvtcolor` 在 `-p 2` 并发下偶发失败（-p 1 时 0 次）。修复：RGA 调用加全局互斥锁串行化。验证：1080p 全片 rga_fail=0。
 - 1080p 实测（test_people_small_little_18s，-n 8，performance）：FPS **15.15**、CPU **360%**、RSS **1127MB**、pre 8.5ms、post 7.7ms、19 目标/帧。单测 **19/19**（新增 1080p 无绿条回归测试）。
+
+### 任务 4 迭代 3：特殊尺寸视频质量修复 + 多格式支持（2026-08-13）
+
+- **特殊尺寸视频模糊修复**（cars-from uav 480×332@60）：
+  - 根因 1：容器帧率元数据缺失（caps 0/1）导致输出按默认 30fps 编码 → 60fps 源被慢放（时长 18.5s）；修复：读取端用 PTS 推算真实帧率。
+  - 根因 2：mpph264enc 自动档码率仅 ~0.64Mbps → 低码率块状伪影；修复：`bps = w×h×fps×0.2`（clamp 1~12Mbps）自适应。
+  - 效果：输出 60fps、时长 9.25s（与源一致）、码率 1.89Mbps；纯转码对照确认编码器本身正常（无检测框时清晰度 8.66 vs 源 10.58，正常损耗）。
+- **多格式支持**：`GstVideoReader` 按扩展名选择链路——容器 `qtdemux/avidemux/matroskademux/tsdemux`，编解码 H.264→H.265 自动重试（`mppvideodec` 两者均支持），图片 `mppjpegdec`（jpg/jpeg）/`pngdec`/`bmpdec`/`webpdec`；**数据流验证**（启动后 800ms 内必须出帧，否则换候选，杜绝"PLAYING 成功但无帧"）；OpenCV 回退保留。
+- **GStreamer RGA 检查结论**：板端 GStreamer **无 RGA 插件**（仅无关的 rganalysis 音频分析，无全局宏可开）；RGA 硬件转换只能在我们自己的代码里做（如 NV12→BGR 用 imcvtcolor），作为后续迭代方向。
+- 单测 **20/20**（新增 AVI/H.264 + MP4/H.265 多格式读取测试）。
+
+### 任务 4 迭代 4：特殊尺寸视频“仍模糊”根治（2026-08-13）
+
+- **用户反馈**：迭代 3 修复后，480×332@60 输出仍比“无 GST 版（8.53Mbps mpeg4）”模糊，且比标准 720p/1080p 输出模糊。
+- **帧级取证**（抽第 200/400 帧，480×332 原始 BGR）：
+  - MPP 硬解→BGR 与 ffmpeg 软解对比度几乎一致（std 53 vs 53）→ **解码端不是模糊主因**；
+  - 所有编码变体（任意码率/QP）对比度统一损失 ~13%（std 47.4→41.3）→ 与码率无关的**系统性色彩学问题**；
+  - 源视频为 **VFR**（555 帧 / 21.7s，平均 26.6fps，标称 60fps），PTS 不规则。
+- **根因 1（色彩学）**：appsrc(BGR) 未声明 colorimetry，mpph264enc 把默认 sRGB 色彩学写入 H.264 VUI：
+  `color_range=pc / color_space=gbr / transfer=sRGB`（实测 ffprobe），而真实内容是 BT.709 limited →
+  解码器按错误矩阵还原，对比度被压、色调偏移（视觉即“发灰/模糊”）。
+  修复：appsrc caps 显式 `colorimetry=bt709` → 输出变为 `color_range=tv / transfer=bt709 / primaries=bt709`，
+  帧 std 恢复至 47.5（源 47.4）。
+- **根因 2（码率/控码）**：默认 rc-mode=cbr + `bps=w×h×fps×0.2` 在 60fps 下仅 ~1.9Mbps，复杂纹理（草地）
+  帧被压成块状伪影；且 profile 默认 baseline（无 CABAC）。修复：默认 **fixqp（rc-mode=2）+ qp-init=22 + profile=high**，
+  恒定质量、按内容自适应码率；`set_encoder_params()` 支持 vbr/cbr/fixqp + QP + profile 配置（diag_reencode 可 A/B）。
+- **健壮性修复**：NPU 模型加载失败时主流程曾永久挂起（reader 阻塞满队列 + wait_idle 空转 + 析构 push 毒丸卡死）；
+  现 NPU 初始化失败计数熔断（`workers_ok_`）、输入直接丢帧、`wait_idle()` 30s 上限、析构先 shutdown 队列。
+  新增回归测试（模型加载失败 <30s 退出）。
+- **PTS 帧率估算**：改为间隔**众数**统计（hist 1~240fps），抗 VFR 单帧抖动；480×332 源仍判 60fps 输出。
+
+#### 编码质量 A/B（同一源 480×332@60，转码 554 帧，fixqp=恒定质量 / vbr/cbr=bps 3.34M）
+
+| 配置 | 输出码率 | 文件大小 | stdG | edgeG@200/400 | lapVarG@200/400 |
+|------|----------|----------|------|---------------|-----------------|
+| 源（ffmpeg 软解参考） | 0.70Mbps | - | 47.4/49.2 | 3.86 / 4.76 | 512 / 522 |
+| fixqp24+high（旧，无 bt709） | 1.80Mbps | 2.1MB | 41.3 | 3.16 / 4.60 | 331 / 496 |
+| **fixqp22+high+bt709** | 2.44Mbps | 2.8MB | 47.5/49.2 | **3.74 / 4.72** | 467 / 516 |
+| vbr+high+bt709 | 3.72Mbps | 4.3MB | 47.6/49.2 | 3.84 / 4.80 | 478 / 524 |
+| 无 GST 软编参考（8.53Mbps@26.6fps，含画框） | 8.53Mbps | 22.2MB | 59.5 | 9.58 | 4087 |
+
+> 结论：colorimetry 修复前对比度损失 ~13%（41.3 vs 47.4），修复后完全恢复；fixqp22 边缘能量保留 97~99%，
+> 与 vbr(3.7M) 相当且文件更小，故定为默认。
+
+#### 修复后完整流水线实测（performance 模式，-p 2 -n 8 -P 3 -c -0.13f，输出带检测框）
+
+| 输入 | FPS | CPU 平均 | 峰值 RSS | 输出码率/大小 | 输出参数 |
+|------|-----|----------|----------|----------------|----------|
+| 特殊 480×332@60 | **15.64** | **328%** | **822MB** | 8.95Mbps / 10.3MB（9.23s） | High/tv/60fps |
+| cars.mp4 720p@30 | 15.38 | 333% | 966MB | 4.35Mbps / 7.2MB | High/tv/30fps |
+| 1080p@25（18s） | 15.02 | 352% | 1148MB | 5.17Mbps / 12.2MB | High/tv/25fps |
+
+> 对比上版：720p FPS 15.40→15.38、CPU 322%→333%、RSS 919→966MB（采样法差异，无实质回归）；
+> 1080p FPS 15.15→15.02、CPU 360%→352%、RSS 1127→1148MB。fixqp 恒质量下码率反而更低（1080p 12M→5.2M）。
+- 输出帧质量：修复版特殊视频 edgeG=8.12 / lapG=3371（无 GST 参考 9.58 / 4087，含画框干扰），顶部绿条=0。
+- 产物：`/home/neardi/Workspace_Codex/img/自测小尺寸_-0.83f_gst_修复v4.mp4`（对比旧模糊版 `_gst_模糊.mp4`）。
+- 单测 **21/21**（新增“模型加载失败不挂起”回归）。
