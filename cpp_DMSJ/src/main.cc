@@ -329,6 +329,29 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 
 	if (use_gst)
 	{
+		// 【任务 4 追加迭代】帧率来源：
+		// - 容器/caps 提供有效帧率（CFR）→ 直接使用；
+		// - VFR 或帧率元数据缺失（如 0/1）→ 两遍法：先纯解码统计容器时长/平均帧率
+		//   （MPP 硬解，555 帧约 2-3s），再正常处理。避免"取前两帧间隔"在 VFR 源上
+		//   误判（如 480×332 录屏前段 60fps burst → 输出 60fps → 时长 21.7s 被压成 9.2s）。
+		double fps_est = gst_reader.fps();
+		if (!gst_reader.caps_fps_authoritative())
+		{
+			GstVideoReader probe;
+			if (probe.open(args.video_path))
+			{
+				cv::Mat dummy;
+				while (probe.read(dummy)) {}
+				double avg = probe.measured_avg_fps();
+				probe.release();
+				if (avg >= 1.0 && avg <= 240.0)
+				{
+					fps_est = avg;
+					LOG(MOD_MAIN, LOG_INFO) << "VFR probe avg fps=" << fps_est << "\n";
+				}
+			}
+		}
+
 		// 硬解：先取首帧获取尺寸/帧率
 		if (!gst_reader.read(frame))
 		{
@@ -336,10 +359,9 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 			gst_reader.release();
 			return 1;
 		}
-		// 预读第二帧，让读取器通过 PTS 估算真实帧率（容器元数据缺失时，如 60fps 录屏）
 		cv::Mat frame2;
 		bool has_second = gst_reader.read(frame2);
-		fps = gst_reader.fps();
+		fps = fps_est;
 		actual_w = frame.cols;
 		actual_h = frame.rows;
 		LOG(MOD_MAIN, LOG_INFO) << "GStreamer+MPP hardware decode: "

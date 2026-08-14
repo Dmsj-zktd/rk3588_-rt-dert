@@ -673,6 +673,27 @@ void test_pipeline_init_failure_no_hang()
 	PASS();
 }
 
+// 测试 22: GstVideoReader VFR 平均帧率估算（回归：480×332 录屏 caps framerate=0/1，
+// 前段 60fps burst 曾导致输出 60fps、时长 21.7s 被压成 9.2s）
+void test_gst_vfr_avg_fps()
+{
+	TEST("GstVideoReader VFR 平均帧率估算");
+	const char* vfr = "/home/neardi/Workspace_Codex/img/cars-from uav_Unconventional Size_.mp4";
+	GstVideoReader r;
+	ASSERT_TRUE(r.open(vfr), "VFR 视频打开失败");
+	ASSERT_TRUE(!r.caps_fps_authoritative(), "VFR 源不应有权威 caps 帧率");
+	cv::Mat f;
+	int n = 0;
+	while (r.read(f)) n++;
+	double avg = r.measured_avg_fps();
+	r.release();
+	ASSERT_TRUE(n > 300, "VFR 读帧数异常");
+	ASSERT_TRUE(avg >= 20.0 && avg <= 35.0,
+	            "VFR 实测平均帧率应约 25~27fps（容器时长/跨度），实际偏出");
+	std::cout << "frames=" << n << " avg_fps=" << avg << " ";
+	PASS();
+}
+
 // ============================================================================
 // 主函数
 // ============================================================================
@@ -708,6 +729,7 @@ int main()
 	test_gst_1080p_no_green_bar();
 	test_gst_multi_format();
 	test_pipeline_init_failure_no_hang();
+	test_gst_vfr_avg_fps();
 
 	std::cout << std::endl;
 	std::cout << "============================================" << std::endl;

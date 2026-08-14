@@ -38,6 +38,11 @@ struct GstVideoReader::Impl
 	bool        opened      = false;
 	guint64     prev_pts    = 0;
 	bool        have_prev_pts = false;
+	// 【任务 4 追加迭代】实测平均帧率统计（两遍法）
+	guint64     first_pts   = GST_CLOCK_TIME_NONE;
+	guint64     last_pts    = GST_CLOCK_TIME_NONE;
+	int         frame_count = 0;
+	bool        caps_fps_valid = false;
 	// 【任务 4 迭代 4】PTS 间隔众数直方图（VFR 视频用众数估计帧率，抗单帧抖动）
 	int         pts_hist[241] = {0};
 };
@@ -198,6 +203,7 @@ bool GstVideoReader::read(cv::Mat& frame)
 		if (gst_structure_get_fraction(s, "framerate", &fr_n, &fr_d) && fr_n > 0 && fr_d > 0)
 		{
 			impl_->fps = (double)fr_n / fr_d;
+			impl_->caps_fps_valid = true;
 		}
 	}
 	// 帧率估算：容器元数据缺失（如 0/1）时用 PTS 间隔众数推算
@@ -290,7 +296,17 @@ bool GstVideoReader::read(cv::Mat& frame)
 			cv::Mat tmp(h, w, CV_8UC3, map.data);
 			cv::cvtColor(tmp, bgr, cv::COLOR_RGB2BGR);
 		}
-		if (!bgr.empty()) bgr.copyTo(frame);
+	if (!bgr.empty())
+	{
+		bgr.copyTo(frame);
+		// 实测统计（两遍法用）：帧数 + 首尾 PTS
+		impl_->frame_count++;
+		if (GST_CLOCK_TIME_IS_VALID(pts))
+		{
+			if (!GST_CLOCK_TIME_IS_VALID(impl_->first_pts)) impl_->first_pts = pts;
+			impl_->last_pts = pts;
+		}
+	}
 	}
 	else
 	{
@@ -307,6 +323,35 @@ double GstVideoReader::fps() const    { return impl_->fps; }
 int GstVideoReader::width() const     { return impl_->width; }
 int GstVideoReader::height() const    { return impl_->height; }
 
+bool GstVideoReader::caps_fps_authoritative() const
+{
+	return impl_->caps_fps_valid;
+}
+
+double GstVideoReader::measured_avg_fps() const
+{
+	if (impl_->frame_count < 2) return 0.0;
+	// 优先容器时长：count/duration 更贴近"原长"（含最后一帧显示时长）
+	gint64 dur = 0;
+	if (impl_->pipeline &&
+	    gst_element_query_duration(impl_->pipeline, GST_FORMAT_TIME, &dur) &&
+	    dur > 0)
+	{
+		double d = (double)dur / GST_SECOND;
+		double f = impl_->frame_count / d;
+		if (d > 0.0 && f >= 1.0 && f <= 240.0) return f;
+	}
+	// 回退：PTS 首尾跨度
+	if (GST_CLOCK_TIME_IS_VALID(impl_->first_pts) &&
+	    GST_CLOCK_TIME_IS_VALID(impl_->last_pts) &&
+	    impl_->last_pts > impl_->first_pts)
+	{
+		double span = (double)(impl_->last_pts - impl_->first_pts) / GST_SECOND;
+		if (span > 0.0) return (impl_->frame_count - 1) / span;
+	}
+	return 0.0;
+}
+
 void GstVideoReader::release()
 {
 	if (impl_->pipeline)
@@ -321,6 +366,10 @@ void GstVideoReader::release()
 	impl_->width = 0;
 	impl_->height = 0;
 	impl_->have_prev_pts = false;
+	impl_->first_pts = GST_CLOCK_TIME_NONE;
+	impl_->last_pts = GST_CLOCK_TIME_NONE;
+	impl_->frame_count = 0;
+	impl_->caps_fps_valid = false;
 }
 
 // ============================================================================

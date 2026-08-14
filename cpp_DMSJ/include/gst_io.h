@@ -31,6 +31,17 @@ class GstVideoReader
 		double fps() const;
 		int    width() const;
 		int    height() const;
+		/**
+		 * @brief 容器/流是否提供了权威帧率（caps framerate 有效且 > 0）。
+		 * @note VFR 或帧率元数据缺失（如 0/1）的源返回 false，需用两遍法实测。
+		 */
+		bool caps_fps_authoritative() const;
+		/**
+		 * @brief 实测平均帧率（任务 4 追加迭代）：
+		 * 优先容器时长（count/duration），否则 PTS 首尾跨度（(count-1)/span）。
+		 * 需先读完整段；无效返回 0。
+		 */
+		double measured_avg_fps() const;
 		void   release();
 
 	private:
