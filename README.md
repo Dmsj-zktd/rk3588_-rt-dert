@@ -247,6 +247,17 @@ make -j$(nproc)
   - 实测（-n 8）：输出 **26fps / 21.31s**（源 21.7s），FPS **15.63** / CPU **321%** / RSS **827MB**（与基线持平），
     全片抽样 **0 帧花屏**；720p/1080p 回归无变化；单测 **22/22**。
 
+- **2026-08-14｜任务 4 迭代 5 修复：CFR 视频误判 VFR 走两遍法**
+  - 问题：迭代 5 声称“CFR 零开销”不实——`caps_fps_valid` 仅在 `read()` 解析 caps 时置位，
+    而两遍法判断发生在 `open()` 后、首次 `read()` 前，导致所有视频都被误判为 VFR；
+    长视频（如 test_people_small_little.mp4，25fps/300s）需先等 probe 全量解码（约 30s+）
+    才打开 VideoWriter，且 fps 用自算值而非视频自带的 25fps。
+  - 修复：`try_start_pipeline` 的 verify 出帧阶段直接从 sample 的 caps 解析 framerate
+    并置 `caps_fps_valid`；CFR 视频 open 后即判定有效 → 直接用 caps 帧率、零两遍；
+    VFR 源（caps 0/1）仍走两遍法。
+  - 验证：长 CFR 无两遍、fps=25、writer 立即打开；特殊 VFR 仍 26fps/21.31s；
+    cars 30fps/13.27s；单测 **22/22**。
+
 ## 🧪 测试与验证
 
 ### 单元测试

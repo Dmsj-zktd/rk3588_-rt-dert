@@ -222,3 +222,18 @@
   - 回归：cars.mp4 720p **15.41FPS/332%/954MB/30fps/13.27s**（基线 15.35/330/945/13.27）；
     1080p **15.17FPS/370%/1152MB/25fps/18.88s**（基线 ~15.0-15.2/352-360/1127-1148/18.9）——无回归。
 - 单测 **22/22**（新增“VFR 平均帧率估算”：读完整段后 avg_fps 应约 25~27fps）。
+
+### 任务 4 迭代 5 修复：CFR 视频被误判 VFR 走两遍法（2026-08-14）
+
+- **用户反馈**：迭代 5 声称“CFR 视频零开销”不实——所有视频都执行 VFR 两遍法；
+  长视频（test_people_small_little.mp4，25fps/300s/6000帧）需先等 probe 全量解码（体感 30s+）
+  才打开 VideoWriter，且 fps 用自算值（24.9967）而非视频自带 25fps。
+- **根因**：`caps_fps_valid` 仅在 `read()` 解析 caps 时置位，而 main 的两遍法判断发生在
+  `open()` 之后、首次 `read()` 之前 → 该标志恒为 false → 所有视频误判为 VFR。
+- **修复**：`try_start_pipeline` 的 verify 出帧阶段直接从 sample 的 caps 解析 framerate
+  并置 `caps_fps_valid`；CFR 视频 open 后即判定有效 → 直接用 caps fps、零两遍。
+- **验证**（performance，-p 2 -n 8 -P 3）：
+  - 长 CFR（test_people_small_little.mp4）：无 "VFR probe"、fps 直接用 **25**、VideoWriter 立即打开；
+  - 特殊 VFR（480×332）：仍两遍（probe 25.5）→ 输出 26fps/21.31s、FPS 15.81；
+  - cars.mp4（30fps CFR）：无两遍 → 输出 30fps/13.27s；
+  - 单测 **22/22**。
