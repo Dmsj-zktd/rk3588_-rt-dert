@@ -95,3 +95,12 @@ sudo sh -c 'echo performance > /sys/class/devfreq/dmc/governor'
 1. **只读类指令**（查看文件/状态、cat、ls、git status、日志等）无需询问，直接放权执行。
 2. **编写/删改类指令**（创建/修改/删除文件、git 提交推送、安装依赖等）**必须先询问用户，获得许可后才能执行**，不可越界。
 3. 其他必要的规则/指令/行为可自行设计，但**必须先过问用户**，经同意后才可写入 AGENTS.md 启用。
+
+# 虚拟机模型转换环境（必须遵守）
+
+- 模型格式转换（py -> onnx -> i8_rknn）必须在虚拟机中执行，不在 RK3588 板端执行。
+- 虚拟机连接：ssh -i C:/Users/zky/.ssh/codex_board_ed25519 zktd@192.168.32.131（端口 22）。
+- 虚拟机 workspace 根目录：/home/zktd/Workspace_Codex/，相关模型在 /home/zktd/Workspace_Codex/models/，初始转换脚本在 /home/zktd/Workspace_Codex/python/（脚本内模型路径需按实际 cases 自行调整）。
+- 执行 rknn 等模型转换前，必须先进入 Miniforge3 虚拟环境：
+  source ~/miniforge3/bin/activate && conda activate toolkit2
+- 默认只做转换实验；不得替换板端主模型，除非用户明确同意。

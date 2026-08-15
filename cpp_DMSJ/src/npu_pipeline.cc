@@ -122,6 +122,8 @@ void PipelineManager::push_dma_frame(int frame_id, const DmaBufferPtr& src_buf, 
 	bundle->frame_id = frame_id;
 	bundle->src_buf = src_buf;
 	bundle->use_dma_src = true;
+	bundle->pred_boxes.resize(NUM_BOXES * 4);
+	bundle->pred_logits.resize(NUM_BOXES * NUM_CLASSES);
 	if (!orig_img.empty())
 	{
 		bundle->orig_img = orig_img.clone();   // ★ 关键：克隆图像
@@ -146,6 +148,8 @@ void PipelineManager::push_image(int frame_id, const cv::Mat& img)
 	bundle->frame_id = frame_id;
 	bundle->orig_img = img.clone();   // ★ 已经 clone，但保留
 	bundle->use_dma_src = false;
+	bundle->pred_boxes.resize(NUM_BOXES * 4);
+	bundle->pred_logits.resize(NUM_BOXES * NUM_CLASSES);
 	bundle->t_enqueue = now_us();
 	queue_raw_.push(std::move(bundle));
 }

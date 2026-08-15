@@ -345,3 +345,12 @@ chmod +x test_robustness.sh
 ---
 
 **Enjoy real-time object detection on RK3588!** 🚀
+
+---
+
+## 任务6 Stage1：RKNN 输出预分配与索引缓存（2026-08-15）
+
+- RKNNDetector 初始化阶段缓存输入/输出属性与 boxes/logits 索引，逐帧不再重复 rknn_query。
+- 输出 buffer 预分配，rknn_outputs_get 使用 is_prealloc=1；FrameBundle 入队时预分配 pred_boxes/pred_logits。
+- 单测 24/24 通过；cars.mp4 n8 15.16 FPS、特殊VFR 15.58 FPS，与任务6前基线持平（±1% 噪声范围）。
+- 任务6其余候选（零拷贝输入、SRAM、显式核心掩码、专用每核拓扑、动态批处理）经实测无收益或未达目标，未保留。

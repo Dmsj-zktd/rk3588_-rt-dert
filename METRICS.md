@@ -237,3 +237,22 @@
   - 特殊 VFR（480×332）：仍两遍（probe 25.5）→ 输出 26fps/21.31s、FPS 15.81；
   - cars.mp4（30fps CFR）：无两遍 → 输出 30fps/13.27s；
   - 单测 **22/22**。
+
+## 任务6 Stage1-3 实测（2026-08-15，performance governor，cars_2s.mp4，-p 2 -n 8 -P 3 -c -0.13f）
+
+| 配置 | Overall FPS | Avg NPU infer | 备注 |
+|------|------------|---------------|------|
+| auto 基线（Stage1 后） | 13.83 | 506.9ms | 输出预分配/缓存已启用 |
+| --rknn-zero-copy | 13.50 | 506.9ms | 输入零拷贝正确但无收益，默认关闭 |
+| --rknn-sram | 13.72 | 510.9ms | 无收益，默认关闭 |
+| --rknn-topology round-robin (-n8) | 13.36 | 516.5ms | 无收益 |
+| --rknn-topology one-per-core (-n3) | 11.80 | 241.7ms | FPS 更低，不采用 |
+
+结论：Stage1-3 运行时优化未能达到 25-30 FPS 目标；需进入动态批处理参考验证（需用户批准后重导出 batch 维度模型）。
+
+## 任务6 最终保留项复测（2026-08-15，顺序执行，performance governor）
+
+- 配置：cars.mp4, -p 2 -n 8 -P 3 -c -0.13f, auto core。
+- 结果：Overall FPS **15.27**，Avg NPU 513.1ms，Avg pre 4.75ms，Avg post 3.18ms。
+- 对照任务6前甜点位基线：约 15.31 FPS；无回退。
+- 保留：Stage1 输出索引缓存 + 输出 buffer 预分配 + FrameBundle 预分配。

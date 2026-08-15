@@ -12,7 +12,7 @@
 | 3 | RGA_DMA 链路分析 + 迭代优化（指标：降低 CPU/内存占用） | **已完成（迭代 1+2）** | 2026-08-12 | 待用户确认上传 |
 | 4 | GStreamer + RK MPP 硬解/硬编替代 OpenCV+FFmpeg 软解/软编 | **已完成（迭代1-5 已入库；迭代5修复 待上传）** | 2026-08-13 | 迭代5修复（2026-08-14）：CFR 视频被误判 VFR 走两遍法 |
 | 5 | 预处理/后处理进一步提速（排除 NPU 时长） | **闲置（暂缓）** | - | 用户 2026-08-14 指令：暂不执行，等 NPU 瓶颈任务处理后再视情况恢复 |
-| 6 | **NPU 推理耗时瓶颈（大任务，优先级最高）** | 待用户指令启动 | - | 用户 2026-08-14 指令：先处理此难题，任务5 闲置；当前 NPU 推理 ~500-560ms/帧为整体 FPS 瓶颈 |
+| 6 | **NPU 推理耗时瓶颈（大任务，优先级最高）** | **进行中：Stage 1-3 已完成，未达 25-30 FPS；待批准动态批处理参考验证** | - | Stage1 输出预分配/缓存；Stage2 零拷贝输入验证正确但无收益；SRAM/显式 core mask/round-robin/one-per-core 均无收益；目标 25-30 FPS 未达成 |
 
 ## 进度记录（动态更新）
 
@@ -58,3 +58,17 @@
   零两遍。验证：长 CFR 无 probe、fps=25、writer 立即打开；特殊 VFR 仍两遍 25.5→26fps/21.3s；
   cars 无两遍 30fps/13.27s；单测 22/22。
 - 本地 git 快照 `cec2a05` 已提交（未推送），含任务 4 全部改动与 `对话上下文摘要.md` 的删除。
+
+### 2026-08-15
+
+- 任务6 Stage1 完成：RKNNDetector 初始化缓存输入/输出 attr 与 boxes/logits 索引；输出预分配并直接写入 FrameBundle；逐帧不再重复 query，不再反量化/搬运冗余输出。单测新增 resolve_rtdetr_output_indices 与 rknn_zero_copy_matches_infer_only，24/24 通过。
+- 任务6 Stage2 完成验证：零拷贝输入 rknn_create_mem_from_fd + rknn_set_io_mem(pass_through=0) 与 infer_only 数值等价；但 cars_2s A/B 无收益（约 13.50 vs 13.83 FPS），故默认保持关闭，保留 --rknn-zero-copy 开关。
+- 任务6 Stage3 完成验证：--rknn-sram、--rknn-topology round-robin/one-per-core 均无收益（约 13.72 / 13.36 / 11.80 FPS），默认保持 auto。
+- 目标 25-30 FPS 未在 Stage1-3 达成；下一步需用户批准动态批处理参考验证。
+
+### 2026-08-15 回退决策（Stage4 放弃，仅保留 Stage1）
+
+- 放弃 Stage4 动态批处理执行；移除 batch3 模型/脚本/诊断产物。
+- 回退 Stage2/Stage3 非收益改动：零拷贝输入、SRAM、topology、batch worker。
+- 仅保留 Stage1：输出张量索引缓存、输出 buffer 预分配、FrameBundle 输出预分配；24/24 单测通过。
+- 顺序复测 cars.mp4 n8：15.27 FPS（基线 15.31），无性能回退。

@@ -18,6 +18,8 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <fstream>
 #include <chrono>
 
 #include <rga.h>
@@ -311,6 +313,79 @@ void test_postprocess_edge_cases()
 // ============================================================================
 // 测试 8: BoundedSafeQueue 基本功能
 // ============================================================================
+void test_resolve_output_indices()
+{
+	TEST("resolve_rtdetr_output_indices");
+
+	std::vector<rknn_tensor_attr> attrs(5);
+	for (auto& a : attrs) memset(&a, 0, sizeof(a));
+	attrs[0].n_elems = 4200;
+	attrs[1].n_elems = 1200;
+	attrs[2].n_elems = 3000;
+	attrs[3].n_elems = 1200;
+	attrs[4].n_elems = 3000;
+
+	int boxes_idx = -1;
+	int logits_idx = -1;
+	resolve_rtdetr_output_indices(attrs, boxes_idx, logits_idx);
+
+	ASSERT_EQ(boxes_idx, 3, "boxes index should be the last 1200-elem tensor");
+	ASSERT_EQ(logits_idx, 4, "logits index should be the last 3000-elem tensor");
+	PASS();
+}
+
+void test_rknn_zero_copy_matches_infer_only()
+{
+	TEST("rknn_zero_copy_matches_infer_only");
+
+	const char* model_path = "/home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn";
+	const char* image_path = "/home/neardi/Workspace_Codex/img/uav.jpg";
+	std::ifstream mf(model_path, std::ios::binary);
+	if (!mf.good())
+	{
+		std::cout << "SKIP (model missing) ";
+		PASS();
+		return;
+	}
+	mf.close();
+
+	cv::Mat src = cv::imread(image_path, cv::IMREAD_COLOR);
+	ASSERT_TRUE(!src.empty(), "uav.jpg should be readable");
+
+	rga_preprocessor().init(2);
+	DmaBufferPtr input_buf = rga_preprocessor().preprocess_mat_to_dma(src);
+	ASSERT_TRUE(input_buf != nullptr, "preprocess_mat_to_dma failed");
+	cv::Mat preprocessed(640, 640, CV_8UC3, input_buf->ptr);
+
+	RKNNDetector d0;
+	ASSERT_TRUE(d0.init(model_path, RKNN_NPU_CORE_AUTO), "zero-copy detector init failed");
+	std::vector<float> boxes0, logits0;
+	int nb0 = 0, nc0 = 0;
+	ASSERT_TRUE(d0.infer_zero_copy(input_buf, boxes0, logits0, nb0, nc0),
+	            "infer_zero_copy failed");
+
+	RKNNDetector d1;
+	ASSERT_TRUE(d1.init(model_path, RKNN_NPU_CORE_AUTO), "infer_only detector init failed");
+	std::vector<float> boxes1, logits1;
+	int nb1 = 0, nc1 = 0;
+	ASSERT_TRUE(d1.infer_only(preprocessed, boxes1, logits1, nb1, nc1),
+	            "infer_only failed");
+
+	ASSERT_EQ(nb0, nb1, "box count mismatch");
+	ASSERT_EQ(nc0, nc1, "class count mismatch");
+	ASSERT_EQ(boxes0.size(), boxes1.size(), "box vector size mismatch");
+	ASSERT_EQ(logits0.size(), logits1.size(), "logit vector size mismatch");
+	for (size_t i = 0; i < boxes0.size(); ++i)
+	{
+		ASSERT_TRUE(std::fabs(boxes0[i] - boxes1[i]) < 1e-6f, "box value mismatch");
+	}
+	for (size_t i = 0; i < logits0.size(); ++i)
+	{
+		ASSERT_TRUE(std::fabs(logits0[i] - logits1[i]) < 1e-6f, "logit value mismatch");
+	}
+	PASS();
+}
+
 void test_bounded_queue()
 {
 	TEST("BoundedSafeQueue 基本功能");
@@ -714,6 +789,8 @@ int main()
 
 	test_postprocess_decode();
 	test_postprocess_edge_cases();
+	test_resolve_output_indices();
+	test_rknn_zero_copy_matches_infer_only();
 
 	test_bounded_queue();
 	test_bounded_queue_poison();

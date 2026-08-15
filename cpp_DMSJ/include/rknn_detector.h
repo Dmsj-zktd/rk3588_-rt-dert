@@ -7,6 +7,22 @@
 #include "types.h"
 #include "rknn_api.h"
 
+inline void resolve_rtdetr_output_indices(
+    const std::vector<rknn_tensor_attr>& attrs,
+    int& boxes_idx,
+    int& logits_idx,
+    int boxes_elems = 300 * 4,
+    int logits_elems = 300 * NUM_CLASSES)
+{
+	boxes_idx = -1;
+	logits_idx = -1;
+	for (size_t i = 0; i < attrs.size(); ++i)
+	{
+		if (attrs[i].n_elems == (uint32_t)boxes_elems) boxes_idx = (int)i;
+		if (attrs[i].n_elems == (uint32_t)logits_elems) logits_idx = (int)i;
+	}
+}
+
 /**
  * @brief RKNN 推理封装类，支持零拷贝 DMA 输入和传统 cv::Mat 输入。
  */
@@ -63,10 +79,12 @@ class RKNNDetector
 		int n_output_ = 0;
 
 		// 仅保存 boxes 和 logits 的属性（用于零拷贝设置）
+		std::vector<rknn_tensor_attr> output_attrs_;
 		rknn_tensor_attr boxes_attr_;
 		rknn_tensor_attr logits_attr_;
 		int boxes_idx_  = -1;
 		int logits_idx_ = -1;
+		std::vector<std::vector<float>> output_buffers_;
 
 		// 加载模型文件
 		unsigned char* load_model(const char* filename, int* model_size);
