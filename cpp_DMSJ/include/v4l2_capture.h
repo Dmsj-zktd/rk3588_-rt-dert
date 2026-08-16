@@ -120,10 +120,8 @@ class V4l2ZeroCopyCapture
 		};
 		std::vector<V4l2MmapBuffer>  mmap_buffers_;
 
-		// 归还队列：已处理完的 V4L2 buffer 索引，等待 VIDIOC_QBUF
-		std::queue<int>            recycle_queue_;
+		// 归还保护：帧释放后立即 VIDIOC_QBUF（多个 worker 可能并发归还）
 		mutable std::mutex         recycle_mtx_;
-		std::condition_variable    recycle_cv_;
 
 		bool    streaming_ = false;
 
@@ -131,6 +129,6 @@ class V4l2ZeroCopyCapture
 		bool negotiate_format();
 		bool request_mmap_buffers();
 		bool export_dma_fds();
-		void enqueue_recycle(int v4l2_index);
+		void return_buffer(int v4l2_index);
 		void do_qbuf(int v4l2_index);
 };

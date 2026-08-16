@@ -104,6 +104,103 @@ class BoundedSafeQueue
 			std::lock_guard<std::mutex> lock(mtx_);
 			return queue_.size();
 		}
+
+		size_t capacity() const
+		{
+			return capacity_;
+		}
+};
+
+// ============================================================================
+// 实时显示帧（任务 8）
+// ============================================================================
+struct DisplayFrame
+{
+	int     frame_id    = -1;   //!< 帧序号（用于按序显示）
+	int64_t t_post_done = 0;    //!< 后处理完成时刻（μs，显示延迟统计基准）
+	cv::Mat img;                //!< 已绘制的检测帧
+};
+
+/**
+ * @brief 显示帧重排序器：保证输出 frame_id 严格递增，杜绝"画面倒退/往返抖动"。
+ *
+ * 后处理线程池（-P > 1）完成顺序与帧号不一致，直接按完成顺序播放会出现
+ * 帧号回退的往返抖动。本类按 frame_id 缓冲：
+ *  - 优先按序弹出连续帧（pop_next）；
+ *  - 前序帧缺失且超时/缓冲超容时，前向跳帧到最低可用帧（pop_skip，只前进不后退）。
+ */
+class DisplayReorderer
+{
+	public:
+		explicit DisplayReorderer(size_t max_pending = 8, int64_t max_wait_us = 120000)
+			: max_pending_(max_pending), max_wait_us_(max_wait_us) {}
+
+		/** @brief 入缓冲（同帧号重复时覆盖）。 */
+		void push(int id, cv::Mat img, int64_t t_post_done)
+		{
+			if (img.empty()) return;
+			if (next_id_ < 0) next_id_ = id;
+			pending_[id] = DisplayFrame{id, t_post_done, std::move(img)};
+		}
+
+		/** @brief 若 next_id 已就绪：按序弹出（输出帧号严格递增）。 */
+		bool pop_next(DisplayFrame& out, int64_t now_us)
+		{
+			if (next_id_ < 0) return false;
+			auto it = pending_.find(next_id_);
+			if (it == pending_.end()) return false;
+			out = std::move(it->second);
+			pending_.erase(it);
+			last_pop_us_ = now_us;
+			next_id_++;
+			return true;
+		}
+
+		/**
+		 * @brief 前序缺失且等待超时/缓冲超容：前向跳帧到最低可用帧并弹出。
+		 * @return true 表示发生了前向跳帧（输出帧号 > 旧 next_id）。
+		 */
+		bool pop_skip(DisplayFrame& out, int64_t now_us)
+		{
+			if (pending_.empty() || next_id_ < 0) return false;
+			// 丢弃所有早于已显示序列的过期帧（迟到帧），绝不倒退输出
+			while (!pending_.empty() && pending_.begin()->first < next_id_)
+			{
+				pending_.erase(pending_.begin());
+			}
+			if (pending_.empty()) return false;
+			if (pending_.size() <= max_pending_ &&
+			    (last_pop_us_ == 0 || now_us - last_pop_us_ <= max_wait_us_))
+			{
+				return false;
+			}
+			auto it = pending_.begin();
+			out = std::move(it->second);
+			pending_.erase(it);
+			last_pop_us_ = now_us;
+			next_id_ = out.frame_id + 1;
+			return true;
+		}
+
+		bool   empty() const
+		{
+			return pending_.empty();
+		}
+		size_t size() const
+		{
+			return pending_.size();
+		}
+		int    next_id() const
+		{
+			return next_id_;
+		}
+
+	private:
+		std::map<int, DisplayFrame> pending_;
+		int     next_id_ = -1;
+		size_t  max_pending_;
+		int64_t max_wait_us_;
+		int64_t last_pop_us_ = 0;
 };
 
 // ============================================================================
@@ -158,9 +255,13 @@ class PipelineManager
 		// 实时显示（任务 7.3）
 		std::atomic<bool> display_enabled_{false};
 		std::atomic<bool> display_quit_{false};
-		BoundedSafeQueue<cv::Mat> display_queue_;
+		BoundedSafeQueue<DisplayFrame> display_queue_;
 		std::thread display_thread_;
 		std::function<void()> quit_callback_;   // 显示窗口按 q/ESC 时通知主流程退出
+		std::atomic<int64_t> display_shown_{0};      // 已显示帧数
+		std::atomic<int64_t> display_latency_us_{0}; // 显示延迟累计（post-done→show）
+		std::atomic<int64_t> display_skips_{0};      // 前向跳帧次数（前序缺失）
+		std::atomic<int64_t> display_backwards_{0};  // 倒退显示次数（应为 0）
 
 		// function
 		void worker_preprocess();
@@ -194,6 +295,12 @@ class PipelineManager
 		 * @param orig_img  原始图像（用于画框，可为空）
 		 */
 		void push_dma_frame(int frame_id, const DmaBufferPtr& src_buf, const cv::Mat& orig_img = cv::Mat());
+
+		/** @brief 输入队列是否有空位（相机实时丢帧策略用，任务 8）。 */
+		bool raw_queue_has_room() const
+		{
+			return queue_raw_.size() < queue_raw_.capacity();
+		}
 
 		/**
 		 * @brief 输入 cv::Mat 图像（兼容路径，内部会转为 DMA）。

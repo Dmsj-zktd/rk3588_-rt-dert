@@ -43,7 +43,7 @@ PipelineManager::PipelineManager(int num_pre, int num_npu, int num_post,
 	  video_initialized_(false),
 	  next_write_frame_id_(0),
 	  is_running_(true),
-	  display_queue_(4)
+	  display_queue_(12)   // 吸收后处理完成突发，减少显示队列丢帧（任务 8）
 {
 
 	rga_preprocessor().init(num_npu + 4);
@@ -338,12 +338,6 @@ void PipelineManager::worker_postprocess()
 			draw_results(bundle->orig_img, results);
 		}
 
-		// 实时显示：丢旧保新队列，避免显示阻塞拖慢流水线（任务 7.3）
-		if (display_enabled_.load() && !bundle->orig_img.empty())
-		{
-			display_queue_.push_drop_oldest(bundle->orig_img);
-		}
-
 		// ==================== 视频写入（核心逻辑） ====================
 		if (!video_output_path_.empty())
 		{
@@ -401,6 +395,13 @@ void PipelineManager::worker_postprocess()
 		total_post_us_ += (bundle->t_post_done - t0);
 		frames_completed_++;
 
+		// 实时显示：丢旧保新队列，避免显示阻塞拖慢流水线（任务 7.3/8）
+		if (display_enabled_.load() && !bundle->orig_img.empty())
+		{
+			display_queue_.push_drop_oldest(
+			    DisplayFrame{bundle->frame_id, bundle->t_post_done, bundle->orig_img});
+		}
+
 		if (frames_completed_ % 30 == 0)
 		{
 			int64_t n = frames_completed_.load();
@@ -429,27 +430,72 @@ void PipelineManager::worker_postprocess()
 // ============================================================================
 void PipelineManager::display_worker()
 {
+	// 【任务 8】显示重排序 + 节奏控制：
+	//  - DisplayReorderer 保证输出帧号严格递增（-P>1 时后处理完成顺序乱序是
+	//    往返抖动的根因），缺失前序帧时超时/超容前向跳帧（只前进不后退）；
+	//  - 每帧至少间隔 66ms（~15fps）显示，避免帧间隔不均造成的抽帧/卡顿观感。
+	DisplayReorderer reorder;
+	const int64_t kMinIntervalUs = 66000;   // ~15.2fps 显示节奏上限
+	int64_t last_show_us = 0;
+	int last_shown_id = -1;
+
 	while (true)
 	{
-		cv::Mat frame;
-		if (!display_queue_.pop(frame)) break;
-		if (frame.empty()) continue;
-		try
+		DisplayFrame f;
+		if (!display_queue_.pop(f)) break;
+		reorder.push(f.frame_id, f.img, f.t_post_done);
+
+		// 尽量把当前缓冲中所有已就绪的连续帧按序显示
+		while (true)
 		{
-			cv::imshow(kDisplayWindow, frame);
-			int key = cv::waitKey(1);
-			if (key == 'q' || key == 27)
+			DisplayFrame out;
+			if (!reorder.pop_next(out, now_us()))
 			{
-				display_quit_ = true;
-				if (quit_callback_) quit_callback_();
+				if (!reorder.pop_skip(out, now_us())) break;   // 等前序帧
+				display_skips_++;
+				LOGT(MOD_PIPELINE, LOG_DEBUG, "Disp") << "jump to frame " << out.frame_id << "\n";
 			}
-		}
-		catch (const cv::Exception& e)
-		{
-			// 无显示环境（headless）时 imshow 抛异常：记录并关闭显示，不中断检测
-			LOG(MOD_PIPELINE, LOG_ERROR) << "Display error (headless?): " << e.what() << "\n";
-			display_enabled_ = false;
-			break;
+
+			// 倒退检测（正常逻辑下不应发生）
+			if (last_shown_id >= 0 && out.frame_id <= last_shown_id)
+			{
+				display_backwards_++;
+				LOGT(MOD_PIPELINE, LOG_ERROR, "Disp") << "backward: " << last_shown_id
+				          << " -> " << out.frame_id << "\n";
+			}
+			last_shown_id = out.frame_id;
+
+			// 节奏控制：保持 ~15fps 均匀推进（帧到达慢于节奏时不等）
+			int64_t now = now_us();
+			if (last_show_us > 0 && now - last_show_us < kMinIntervalUs)
+			{
+				std::this_thread::sleep_for(std::chrono::microseconds(
+				    kMinIntervalUs - (now - last_show_us)));
+				now = now_us();
+			}
+			last_show_us = now;
+
+			try
+			{
+				cv::imshow(kDisplayWindow, out.img);
+				int key = cv::waitKey(1);
+				if (key == 'q' || key == 27)
+				{
+					display_quit_ = true;
+					if (quit_callback_) quit_callback_();
+				}
+			}
+			catch (const cv::Exception& e)
+			{
+				// 无显示环境（headless）时 imshow 抛异常：记录并关闭显示，不中断检测
+				LOG(MOD_PIPELINE, LOG_ERROR) << "Display error (headless?): " << e.what() << "\n";
+				display_enabled_ = false;
+				return;
+			}
+
+			display_shown_++;
+			int64_t lag = now - out.t_post_done;
+			if (lag > 0) display_latency_us_ += lag;
 		}
 	}
 }
@@ -538,5 +584,17 @@ void PipelineManager::print_perf_summary()
 	ls << "Avg preprocess      : " << (double)total_pre_us_.load() / n << " us\n";
 	ls << "Avg NPU infer       : " << (double)total_npu_us_.load() / n << " us\n";
 	ls << "Avg postprocess     : " << (double)total_post_us_.load() / n << " us\n";
+	if (display_enabled_.load())
+	{
+		int64_t shown = display_shown_.load();
+		ls << "Display shown       : " << shown << "\n";
+		if (shown > 0)
+		{
+			ls << "Display avg lag     : " << (double)display_latency_us_.load() / shown / 1000.0
+			          << " ms (post-done -> show)\n";
+		}
+		ls << "Display skips       : " << display_skips_.load() << "\n";
+		ls << "Display backwards   : " << display_backwards_.load() << "\n";
+	}
 	ls << "==========================================\n";
 }

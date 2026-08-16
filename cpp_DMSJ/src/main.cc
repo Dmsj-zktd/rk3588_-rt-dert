@@ -329,14 +329,16 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline,
 
 	int frame_id = 0;
 	int consecutive_empty = 0;
+	int dropped_frames = 0;
 	while (!g_should_exit)
 	{
 		DmaBufferPtr src_buf = cap.read_frame();
 		if (!src_buf)
 		{
-			// 无新帧（poll 超时/EAGAIN）或设备错误：仅首次与每 10 次提示一次，避免刷屏
+			// 无新帧（poll 超时/EAGAIN）或设备错误：仅首次与每 10 次提示一次，避免刷屏；
+			// 退出信号中断 poll（EINTR）时也返回 nullptr，此时不再告警。
 			consecutive_empty++;
-			if (consecutive_empty == 1 || consecutive_empty % 10 == 0)
+			if (!g_should_exit && (consecutive_empty == 1 || consecutive_empty % 10 == 0))
 			{
 				LOG(MOD_MAIN, LOG_WARN) << "V4L2 read_frame returned no frame ("
 				          << consecutive_empty << "x)\n";
@@ -344,12 +346,22 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline,
 			continue;
 		}
 		consecutive_empty = 0;
+
+		// 【任务 8】实时丢帧：流水线输入队列已满（如 NPU 初始化期/处理不过来）时
+		// 直接丢弃该帧并立即归还相机 buffer，避免相机 buffer 耗尽停流（"no frame"
+		// 警告）与启动期积压旧帧造成的显示滞后；处理链路保持零拷贝不变。
+		if (!pipeline.raw_queue_has_room())
+		{
+			dropped_frames++;
+			continue;
+		}
+
 		cv::Mat orig_img;
 		v4l2_dma_to_mat(src_buf, orig_img);
 		pipeline.push_dma_frame(frame_id++, src_buf, orig_img);
 	}
 
-	cap.stop();
+	LOG(MOD_MAIN, LOG_INFO) << "Camera frames dropped (input queue full): " << dropped_frames << "\n";
 	return 0;
 }
 

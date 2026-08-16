@@ -12,7 +12,8 @@ LOG="$1"
 shift
 
 MODEL="${MODEL_PATH:-/home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn}"
-cd /home/neardi/Workspace_Codex/rk3588_-rt-detr/cpp_DMSJ/build || exit 2
+BUILD_DIR="${PROJ_BUILD:-/home/neardi/Workspace_Codex/rk3588_-rt-detr/cpp_DMSJ/build}"
+cd "$BUILD_DIR" || exit 2
 
 ./rtdetr_pipeline -m "$MODEL" "$@" > "$LOG" 2>&1 &
 PID=$!

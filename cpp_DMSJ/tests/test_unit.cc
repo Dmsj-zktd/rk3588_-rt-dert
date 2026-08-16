@@ -749,6 +749,44 @@ void test_draw_results_dense_small()
 }
 
 // ============================================================================
+// 测试 28: DisplayReorderer 按序输出 + 前向跳帧（任务 8：显示抖动根因回归）
+// ============================================================================
+void test_display_reorderer()
+{
+	TEST("DisplayReorderer 按序输出/前向跳帧");
+
+	DisplayReorderer r;
+	r.push(1, cv::Mat(16, 16, CV_8UC3), 100);
+	r.push(3, cv::Mat(16, 16, CV_8UC3), 100);
+
+	DisplayFrame out;
+	ASSERT_TRUE(r.pop_next(out, 1000), "frame1 应就绪");
+	ASSERT_EQ(out.frame_id, 1, "应先输出 1");
+	ASSERT_TRUE(!r.pop_next(out, 1000), "frame2 未就绪不应输出");
+
+	// 前序 2 缺失且等待超时：前向跳帧到 3（只前进不后退）
+	ASSERT_TRUE(r.pop_skip(out, 1000 + 130000), "超时应前向跳帧");
+	ASSERT_EQ(out.frame_id, 3, "应跳到 3");
+	ASSERT_EQ(r.next_id(), 4, "跳帧后 next 应为 4");
+
+	// 迟到帧（id < 已显示序列）应被丢弃，不得倒退输出（任务 8 回归）
+	r.push(2, cv::Mat(16, 16, CV_8UC3), 100);
+	ASSERT_TRUE(!r.pop_skip(out, 2000 + 130000), "过期帧应被丢弃且不输出");
+	ASSERT_TRUE(r.empty(), "过期帧应已清除");
+
+	// 乱序到达 5,4 → 按序输出 4,5，输出序列严格递增
+	r.push(5, cv::Mat(16, 16, CV_8UC3), 100);
+	r.push(4, cv::Mat(16, 16, CV_8UC3), 100);
+	ASSERT_TRUE(r.pop_next(out, 2000), "frame4 应就绪");
+	ASSERT_EQ(out.frame_id, 4, "输出 4");
+	ASSERT_TRUE(r.pop_next(out, 2000), "frame5 应就绪");
+	ASSERT_EQ(out.frame_id, 5, "输出 5");
+	ASSERT_TRUE(r.empty(), "缓冲应已清空");
+
+	PASS();
+}
+
+// ============================================================================
 // 测试 14: 日志等级化模块化控制（uncle-bob 约束：新代码必须配套单元测试）
 // ============================================================================
 void test_logger_modules()
@@ -980,6 +1018,7 @@ int main()
 	test_bounded_queue();
 	test_bounded_queue_poison();
 	test_queue_drop_oldest();
+	test_display_reorderer();
 
 	test_performance_benchmark();
 	test_detect_image_guard();

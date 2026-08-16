@@ -285,29 +285,20 @@ DmaBufferPtr V4l2ZeroCopyCapture::read_frame()
 {
 	if (!streaming_) return nullptr;
 
-	// 先归还所有待回收的 buffer
-	{
-		std::lock_guard<std::mutex> lock(recycle_mtx_);
-		while (!recycle_queue_.empty())
-		{
-			do_qbuf(recycle_queue_.front());
-			recycle_queue_.pop();
-		}
-	}
-
 	// 取一帧
-	// 【任务 7.1】带超时等待帧就绪：SIGTERM/SIGINT 后 DQBUF 可能因 SA_RESTART
-	// 被自动重启而永久阻塞，导致摄像头模式无法优雅退出。poll 500ms 超时返回
-	// nullptr，让主循环有机会检查退出标志。
+	// 【任务 7.1/8】带超时等待帧就绪：SIGTERM/SIGINT 后 DQBUF 可能因 SA_RESTART
+	// 被自动重启而永久阻塞，导致摄像头模式无法优雅退出。poll 超时返回 nullptr，
+	// 让主循环有机会检查退出标志（信号中断 poll 时立即返回 EINTR）。
+	// 1500ms：兼容部分 UVC 相机流启动时首个帧延迟 >500ms（避免启动期误报）。
 	struct pollfd pfd = { fd_, POLLIN, 0 };
-	int pr = poll(&pfd, 1, 500);
+	int pr = poll(&pfd, 1, 1500);
 	if (pr < 0)
 	{
 		if (errno == EINTR) return nullptr;
 		LOG(MOD_V4L2, LOG_ERROR) << "poll failed: " << strerror(errno) << "\n";
 		return nullptr;
 	}
-	if (pr == 0) return nullptr;   // 500ms 无新帧（超时），调用方决定是否退出
+	if (pr == 0) return nullptr;   // 超时无新帧，调用方决定是否退出
 
 	struct v4l2_buffer buf = {};
 	buf.type   = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -350,21 +341,21 @@ DmaBufferPtr V4l2ZeroCopyCapture::read_frame()
 		b->handle = 0;
 		b->drm_fd = -1;
 		delete b;
-		enqueue_recycle(idx);
+		// 【任务 8】立即归还：帧在预处理完成后即释放 src_buf（见 worker_preprocess），
+		// 若等下次 read_frame 才 QBUF，主线程阻塞在满队列时相机 buffer 会耗尽停流，
+		// 出现 "read_frame returned no frame" 与卡帧抖动（高帧率源如 640x480@30）。
+		return_buffer(idx);
 	});
 }
 
 // ----------------------------------------------------------------------------
 // 归还 V4L2 buffer
 // ----------------------------------------------------------------------------
-void V4l2ZeroCopyCapture::enqueue_recycle(int v4l2_index)
+void V4l2ZeroCopyCapture::return_buffer(int v4l2_index)
 {
 	if (fd_ < 0) return;   // 已 stop：不再归还（deleter 可能晚于 stop 触发）
-	{
-		std::lock_guard<std::mutex> lock(recycle_mtx_);
-		recycle_queue_.push(v4l2_index);
-	}
-	recycle_cv_.notify_one();
+	std::lock_guard<std::mutex> lock(recycle_mtx_);
+	do_qbuf(v4l2_index);
 }
 
 void V4l2ZeroCopyCapture::do_qbuf(int v4l2_index)
@@ -386,16 +377,6 @@ void V4l2ZeroCopyCapture::stop()
 		enum v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 		ioctl(fd_, VIDIOC_STREAMOFF, &type);
 		streaming_ = false;
-	}
-
-	// 处理完所有待归还的 buffer
-	{
-		std::lock_guard<std::mutex> lock(recycle_mtx_);
-		while (!recycle_queue_.empty())
-		{
-			do_qbuf(recycle_queue_.front());
-			recycle_queue_.pop();
-		}
 	}
 
 	// 注意：dma_fd 由 V4L2 内核管理，close 后内核会自动回收
