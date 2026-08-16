@@ -51,6 +51,7 @@ struct Args
 	int  debug        = -1;   // -G/--DEBUG：-1 表示未指定（默认全模块）
 	bool use_v4l2     = true;
 	bool show_fps     = true;
+	bool show_display = false;
 	rknn_core_mask npu_mask = RKNN_NPU_CORE_AUTO;
 };
 
@@ -76,6 +77,7 @@ void print_usage(const char* prog)
 	          << "  -q, --queue-cap <n>    Queue capacity (default: 16)\n"
 	          << "  --npu-cores <val>      NPU core mask: auto|0|1|2|0,1|0,1,2 (default: auto)\n"
 	          << "  --opencv                Use OpenCV camera (fallback)\n"
+	          << "  --display               Show real-time detection window (requires display)\n"
 	          << "  -G, --debug <n>        Log modules: 0=errors+report; 1=[Main]; 2=+[RKNN]; 3=+[Pipeline]; ... 8=all (default: all)\n"
 	          << "  -h, --help              Show this help\n";
 }
@@ -191,6 +193,10 @@ bool parse_args(int argc, char** argv, Args& args)
 		{
 			args.use_v4l2 = false;
 		}
+		else if (arg == "--display")
+		{
+			args.show_display = true;
+		}
 		else if (arg == "-G" || arg == "--debug")
 		{
 			args.debug = std::stoi(get_val("debug"));
@@ -268,9 +274,33 @@ int run_image_mode(const Args& args, PipelineManager& pipeline)
 // ============================================================================
 // V4L2 零拷贝摄像头模式
 // ============================================================================
-int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
+// 将 V4L2 DMA 帧拷贝为 cv::Mat（用于画框/写视频；推理仍走 DMA 零拷贝路径）
+static void v4l2_dma_to_mat(const DmaBufferPtr& buf, cv::Mat& out)
 {
-	V4l2ZeroCopyCapture cap;
+	if (!buf) return;
+	out = cv::Mat();
+	if (buf->format == RK_FORMAT_YUYV_422)
+	{
+		cv::Mat yuyv(buf->height, buf->width, CV_8UC2, buf->ptr, buf->stride);
+		cv::cvtColor(yuyv, out, cv::COLOR_YUV2BGR_YUY2);
+	}
+	else if (buf->format == RK_FORMAT_BGR_888 || buf->format == RK_FORMAT_RGB_888)
+	{
+		out.create(buf->height, buf->width, CV_8UC3);
+		uint8_t* d = out.data;
+		const uint8_t* s = (const uint8_t*)buf->ptr;
+		for (int y = 0; y < buf->height; ++y)
+		{
+			memcpy(d, s, (size_t)buf->width * 3);
+			d += out.step;
+			s += buf->stride;
+		}
+	}
+}
+
+int run_v4l2_mode(const Args& args, PipelineManager& pipeline,
+                  V4l2ZeroCopyCapture& cap)
+{
 	if (!cap.open(args.device, args.width, args.height, args.fps))
 	{
 		LOG(MOD_MAIN, LOG_ERROR) << "Failed to open V4L2 device: " << args.device << "\n";
@@ -286,7 +316,7 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
 	int actual_w = cap.width();
 	int actual_h = cap.height();
 	LOG(MOD_MAIN, LOG_INFO) << "V4L2 actual resolution: " << actual_w << "x" << actual_h << "\n";
-	rga_preprocessor().get_src_pool(actual_w, actual_h, RK_FORMAT_BGR_888);
+	rga_preprocessor().get_src_pool(actual_w, actual_h, cap.format());
 
 	// 如果指定了输出视频，设置输出（使用args.fps）
 	if (!args.output_path.empty())
@@ -298,15 +328,25 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline)
 	          << cap.width() << "x" << cap.height() << "\n";
 
 	int frame_id = 0;
+	int consecutive_empty = 0;
 	while (!g_should_exit)
 	{
 		DmaBufferPtr src_buf = cap.read_frame();
 		if (!src_buf)
 		{
-			LOG(MOD_MAIN, LOG_ERROR) << "V4L2 read_frame failed, retrying...\n";
+			// 无新帧（poll 超时/EAGAIN）或设备错误：仅首次与每 10 次提示一次，避免刷屏
+			consecutive_empty++;
+			if (consecutive_empty == 1 || consecutive_empty % 10 == 0)
+			{
+				LOG(MOD_MAIN, LOG_WARN) << "V4L2 read_frame returned no frame ("
+				          << consecutive_empty << "x)\n";
+			}
 			continue;
 		}
-		pipeline.push_dma_frame(frame_id++, src_buf);
+		consecutive_empty = 0;
+		cv::Mat orig_img;
+		v4l2_dma_to_mat(src_buf, orig_img);
+		pipeline.push_dma_frame(frame_id++, src_buf, orig_img);
 	}
 
 	cap.stop();
@@ -478,8 +518,18 @@ int main(int argc, char** argv)
 	PipelineManager pipeline(pre_workers, npu_workers, post_workers,
 	                         args.model_path,
 	                         args.queue_cap, args.conf, args.npu_mask);
+	pipeline.set_display(args.show_display);
+	pipeline.set_quit_callback([]()
+	{
+		g_should_exit = true;
+	});
 
 	// 注意：此处不再统一调用 set_video_output，而是在各个采集模式中按需调用
+
+	// V4l2ZeroCopyCapture 必须在 PipelineManager 之前创建、之后析构：
+	// 帧的 DmaBufferPtr deleter 会向采集对象归还 buffer，若采集对象先于
+	// 流水线销毁（如 run_xxx_mode 局部对象），析构期会访问已销毁对象 → 崩溃。
+	V4l2ZeroCopyCapture cap;
 
 	// 选择采集模式
 	int ret = 0;
@@ -493,7 +543,7 @@ int main(int argc, char** argv)
 	}
 	else if (args.use_v4l2)
 	{
-		ret = run_v4l2_mode(args, pipeline);
+		ret = run_v4l2_mode(args, pipeline, cap);
 	}
 	else
 	{

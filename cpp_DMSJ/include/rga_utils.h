@@ -99,6 +99,17 @@ class RgaPreprocessor
 };
 
 /**
+ * @brief YUYV(4:2:2) → BGR 转换（BT.601 limited range，与 OpenCV COLOR_YUV2BGR_YUY2 一致）。
+ * @param src        源 YUYV 数据（每像素 2 字节，按行连续）
+ * @param src_stride 源行跨度（字节）
+ * @param dst        目标 BGR 数据
+ * @param dst_stride 目标行跨度（字节）
+ * @param w,h        图像宽高（w 需为偶数）
+ */
+void yuyv422_to_bgr(const uint8_t* src, size_t src_stride,
+                    uint8_t* dst, size_t dst_stride, int w, int h);
+
+/**
  * @brief 全局 RGA 预处理器单例（线程安全，懒加载）。
  * @return 单例引用
  */

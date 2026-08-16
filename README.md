@@ -16,7 +16,7 @@
   预处理器、NPU 推理器、后处理器可配置多线程，充分利用 RK3588 的 8 核 CPU 和 3 核 NPU。
 
 - **灵活的输入源**  
-  - V4L2 摄像头（/dev/videoX）零拷贝采集  
+  - V4L2 摄像头（/dev/videoX）零拷贝采集：支持 BGR3/RGB3/YUYV 格式协商（USB 摄像头如 /dev/video41 Web Camera 走 YUYV，RGA 硬件转 RGB 保持零拷贝）  
   - 本地视频文件（**GStreamer + RK MPP 硬件解码**，支持 mp4/avi/mkv/ts/webm/hevc/h264 等；失败自动回退 OpenCV 软解）  
   - 本地图片（jpg/jpeg 走 mppjpegdec 硬解，png/bmp/webp 软解，失败回退 OpenCV）  
   - 回退模式：标准 OpenCV 摄像头采集
@@ -26,6 +26,12 @@
 
 - **性能监控**  
   自动统计各阶段耗时（预处理、NPU 推理、后处理）及整体 FPS，便于调优。
+
+- **实时检测显示**  
+  `--display` 开启后由专用线程实时播放检测画面（丢旧保新队列，不阻塞流水线），按 q/ESC 退出；无显示环境自动降级、不中断检测。
+
+- **自适应画框**  
+  `draw_results` 线宽/字号随输入分辨率自动调节（720p=2px/0.6 基准，1080p=3px/0.9，4K 封顶 4px/1.2），小目标只画细框不写文字，避免遮挡密集目标。
 
 - **健壮性测试脚本**  
   提供 `test_robustness.sh` 用于环境检查、功能验证和压力测试。
@@ -109,6 +115,7 @@ make -j$(nproc)
 | `-q, --queue-cap`    | 各阶段队列容量                                           | 16                  |
 | `--npu-cores`        | NPU 核心选择：`auto` / `0` / `1` / `2` / `0,1` / `0,1,2` | `auto`              |
 | `--opencv`           | 强制使用 OpenCV 摄像头（回退）                           | 使用 V4L2           |
+| `--display`          | 实时显示检测画面（需 X11/显示环境；q/ESC 退出）          | 关闭                |
 | `-G, --debug`        | 日志模块：0=仅错误+报告；1=[Main]；2=+[RKNN]；…；8=全部   | 全部                |
 | `-h, --help`         | 显示帮助                                                 | -                   |
 
@@ -116,7 +123,7 @@ make -j$(nproc)
 
 #### 1. 使用 V4L2 摄像头（默认）
 ```bash
-./rtdetr_pipeline -m rtdetr_r18.rknn -d /dev/video0 -W 1920 -H 1080 -o output.mp4
+./rtdetr_pipeline -m rtdetr_r18.rknn -d /dev/video41 -W 1280 -H 720 -F 30 -c -0.13 --display
 ```
 
 #### 2. 处理本地视频文件
@@ -197,9 +204,10 @@ make -j$(nproc)
 | ---------------------------- | -------------- |
 | 预处理（RGA virt→DMA，mat 输入）        | ~ 5.5ms        |
 | NPU 推理（640×640 INT8，3 核饱和）      | ~ 850ms/帧     |
-| 后处理 + 画框                | ~ 3ms（硬编卸载后） |
+| 后处理 + 画框                | ~ 0.5ms（任务7.2 优化后，cars.mp4 n8；相机 ~0.01~0.35ms） | 
 | **整体 FPS**（最佳性能 -p 2 -n 14 -P 3，硬解硬编） | **~ 15.8 FPS**（CPU ~386%、RSS ~1487MB） |
 | **整体 FPS**（甜点位 -p 2 -n 8 -P 3，硬解硬编）    | **~ 15.4 FPS**（CPU ~322%、RSS ~919MB） |
+| **摄像头 /dev/video41**（YUYV 720p，源上限 ~10.8fps，-p 2 -n 8 -P 3） | **~ 10.8 FPS**（CPU ~119%、RSS ~780MB） |
 
 > 以上为一次实测的均值参考，实际性能受模型复杂度、输入分辨率、线程/核心配置及 CPU 调度等影响，请以实际测量为准。
 
@@ -354,3 +362,21 @@ chmod +x test_robustness.sh
 - 输出 buffer 预分配，rknn_outputs_get 使用 is_prealloc=1；FrameBundle 入队时预分配 pred_boxes/pred_logits。
 - 单测 24/24 通过；cars.mp4 n8 15.16 FPS、特殊VFR 15.58 FPS，与任务6前基线持平（±1% 噪声范围）。
 - 任务6其余候选（零拷贝输入、SRAM、显式核心掩码、专用每核拓扑、动态批处理）经实测无收益或未达目标，未保留。
+
+---
+
+## 任务7：摄像头通路 + draw_results 优化 + 实时播放（2026-08-15/16）
+
+### 7.1 摄像头通路（/dev/video41 Web Camera）
+- 协商 YUYV 1280×720（stride 2560，源上限 ~10.8fps）→ DMA→RGA→NPU→画框→MPP 硬编全链路打通；无检测目标 cases 正常（属预期）。
+- 修复：V4L2 格式协商链 BGR3→RGB3→YUYV；相机 buffer 生命周期（不提前 munmap/close）；预处理后提前归还相机 buffer（7.6→10.8 FPS）；采集对象生命周期（退出不再 core dump）；read_frame poll 500ms 优雅退出；默认不写视频（仅 -o 指定）。
+- 实测（performance，50s 采样）：n8 10.82 FPS / CPU ~119% / RSS 780MB / pre 1.95ms / npu 233ms / post 0.35ms；n14 同 FPS / RSS 1308MB。
+
+### 7.2 draw_results 优化
+- 类别固定调色板（去逐框 RNG）、每帧每类文字度量缓存、去掉 putText 抗锯齿、小目标细框不画文字；线宽/字号随分辨率自适应。
+- 微基准（同帧同目标 A/B）：720p 密集场景 3.4~3.8x、1080p 3.4x；流水线 post 视频 1.34→0.49ms（-63%）、相机 0.35→0.013ms（-96%）。
+
+### 7.3 实时播放（--display）
+- 专用显示线程 + 丢旧保新队列（容量 4，不阻塞流水线）；q/ESC 退出；headless 自动降级。
+- 实测：视频 n8 显示 15.27 FPS（无显示 15.37，差 <1%）；相机 n8 显示 10.81 FPS（持平）。
+- 单测 **29/29**；视频双基准复测 n8 15.37 FPS/943MB、n14 15.67 FPS/1508MB，与基线持平。
