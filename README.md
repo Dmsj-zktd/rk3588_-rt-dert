@@ -106,7 +106,7 @@ make -j$(nproc)
 | `-d, --device`       | V4L2 设备路径（摄像头模式）                              | `/dev/video0`       |
 | `-W, --width`        | 采集宽度-(暂时废弃，已auto适配src尺寸)                   | 1920                |
 | `-H, --height`       | 采集高度-(暂时废弃，已auto适配src尺寸)                   | 1080                |
-| `-F, --fps`          | 期望帧率（仅对摄像头有效）                               | 30                  |
+| `-F, --fps`          | 输入/输出帧率覆盖（视频文件：输入限速+输出fps；摄像头：采集请求+输出fps；未指定=自动/源） | 自动/源            |
 | `-o, --output`       | 输出路径（视频 MP4 / 图片 jpg、png）                     | 视频 result_output.mp4 / 图片 out_detect.jpg |
 | `-c, --conf`         | 置信度阈值（模型输出未归一化，有效范围 > -1）            | 0.45                |
 | `-n, --npu-workers`  | NPU 推理线程数                                           | 3                   |

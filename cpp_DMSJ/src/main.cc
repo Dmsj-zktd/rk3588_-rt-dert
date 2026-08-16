@@ -43,6 +43,7 @@ struct Args
 	int  width      = 1920;
 	int  height     = 1080;
 	int  fps        = 30;
+	bool fps_set    = false;   // 用户是否显式指定 -F/--fps
 	int  pre_workers  = 2;
 	int  npu_workers  = 3;
 	int  post_workers = 1;
@@ -68,7 +69,7 @@ void print_usage(const char* prog)
 	          << "  -d, --device <dev>      V4L2 device (default: /dev/video0)\n"
 	          << "  -W, --width <n>         Capture width (default: 1920, fallback)\n"
 	          << "  -H, --height <n>        Capture height (default: 1080, fallback)\n"
-	          << "  -F, --fps <n>           Capture fps (default: 30)\n"
+	          << "  -F, --fps <n>           Override input/output fps (video file & camera; default: auto/source)\n"
 	          << "  -o, --output <path>     Output video path (default: none)\n"
 	          << "  -c, --conf <f>          Confidence threshold (default: 0.45)\n"
 	          << "  -n, --npu-workers <n>   NPU workers (default: 3)\n"
@@ -131,6 +132,7 @@ bool parse_args(int argc, char** argv, Args& args)
 		else if (arg == "-F" || arg == "--fps")
 		{
 			args.fps = std::stoi(get_val("fps"));
+			args.fps_set = true;
 		}
 		else if (arg == "-o" || arg == "--output")
 		{
@@ -367,6 +369,19 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 	int frame_id = 0;
 	cv::Mat frame;
 
+	// 【任务 9】-F/--fps 显式指定时：输入侧按指定速率限速喂帧，输出侧用指定 fps 写容器；
+	// 未指定时保持现有默认（输入不限速，输出用源 fps），不影响基准性能。
+	double feed_fps = (args.fps_set && args.fps > 0) ? (double)args.fps : 0.0;
+	auto feed_start = std::chrono::steady_clock::now();
+	int64_t fed_frames = 0;
+	auto pace_feed = [&]()
+	{
+		if (feed_fps <= 0) return;
+		fed_frames++;
+		auto target = feed_start + std::chrono::duration<double>(fed_frames / feed_fps);
+		std::this_thread::sleep_until(target);
+	};
+
 	if (use_gst)
 	{
 		// 【任务 4 追加迭代】帧率来源：
@@ -375,7 +390,7 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 		//   （MPP 硬解，555 帧约 2-3s），再正常处理。避免"取前两帧间隔"在 VFR 源上
 		//   误判（如 480×332 录屏前段 60fps burst → 输出 60fps → 时长 21.7s 被压成 9.2s）。
 		double fps_est = gst_reader.fps();
-		if (!gst_reader.caps_fps_authoritative())
+		if (!args.fps_set && !gst_reader.caps_fps_authoritative())
 		{
 			GstVideoReader probe;
 			if (probe.open(args.video_path))
@@ -406,17 +421,26 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 		actual_h = frame.rows;
 		LOG(MOD_MAIN, LOG_INFO) << "GStreamer+MPP hardware decode: "
 		          << actual_w << "x" << actual_h << " @" << fps << "\n";
+		double out_fps = args.fps_set ? (double)args.fps : fps;
+		if (args.fps_set)
+		{
+			LOG(MOD_MAIN, LOG_INFO) << "User --fps override: input feed & output fps = "
+			          << args.fps << "\n";
+		}
 		if (!args.output_path.empty())
 		{
-			pipeline.set_video_output(args.output_path, fps);
+			pipeline.set_video_output(args.output_path, out_fps);
 		}
 		pipeline.push_image(frame_id++, frame);
+		pace_feed();
 		if (has_second)
 		{
 			pipeline.push_image(frame_id++, frame2);
+			pace_feed();
 			while (!g_should_exit && gst_reader.read(frame))
 			{
 				pipeline.push_image(frame_id++, frame);
+				pace_feed();
 			}
 		}
 		gst_reader.release();
@@ -436,13 +460,15 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 		actual_h = (int)cap.get(cv::CAP_PROP_FRAME_HEIGHT);
 		LOG(MOD_MAIN, LOG_WARN) << "GStreamer unavailable, fallback to OpenCV soft decode: "
 		          << actual_w << "x" << actual_h << "\n";
+		double out_fps = args.fps_set ? (double)args.fps : fps;
 		if (!args.output_path.empty())
 		{
-			pipeline.set_video_output(args.output_path, fps);
+			pipeline.set_video_output(args.output_path, out_fps);
 		}
 		while (!g_should_exit && cap.read(frame))
 		{
 			pipeline.push_image(frame_id++, frame);
+			pace_feed();
 		}
 		cap.release();
 	}
