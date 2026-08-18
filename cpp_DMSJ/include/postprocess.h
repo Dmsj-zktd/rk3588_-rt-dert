@@ -27,7 +27,7 @@ std::vector<DetectResult> decode_rtdetr_output(float* boxes_data,
                                                 int num_classes = NUM_CLASSES);  
 
 /**
- * @brief 画框样式（随输入分辨率自适应，任务 7.2）。
+ * @brief 画框样式（随输入分辨率自适应）。
  */
 struct DrawStyle
 {
@@ -51,6 +51,6 @@ DrawStyle compute_draw_style(int frame_w, int frame_h);
  * @param image   待绘制图像（会被修改）
  * @param results 检测结果列表
  * @note 颜色按类别固定（确定性调色板）；线宽/字号随分辨率自适应；
- *       小目标只画细框不画文字，避免遮挡密集目标（任务 7.2）。
+ *       小目标只画细框不画文字，避免遮挡密集目标。
  */
 void draw_results(cv::Mat& image, const std::vector<DetectResult>& results);

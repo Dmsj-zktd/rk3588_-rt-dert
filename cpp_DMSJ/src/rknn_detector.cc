@@ -56,7 +56,7 @@ RKNNDetector::~RKNNDetector()
 }
 
 // ============================================================================
-// 查询输入输出属性（通过名称匹配）
+// 查询输入输出属性（按元素数形状识别 boxes/logits）
 // ============================================================================
 bool RKNNDetector::query_io_attrs()
 {
@@ -88,8 +88,7 @@ bool RKNNDetector::query_io_attrs()
 		}
 	}
 
-	// 遍历所有输出，通过形状识别 boxes 和 logits
-	// （与原版 rknn_rtdetr_demo 一致：boxes n_elems==300*4，logits n_elems==300*NUM_CLASSES，最后匹配者胜）
+	// 遍历所有输出，收集全部张量属性，稍后按元素数形状识别 boxes 和 logits
 	boxes_idx_ = -1;
 	logits_idx_ = -1;
 	output_attrs_.clear();
@@ -110,7 +109,6 @@ bool RKNNDetector::query_io_attrs()
 		          << " scale=" << attr.scale << " zp=" << attr.zp
 		          << " name=" << attr.name << "\n";
 
-		// 与原版一致：按元素数精确匹配（300*4 / 300*NUM_CLASSES），最后匹配者胜
 	}
 
 	resolve_rtdetr_output_indices(output_attrs_, boxes_idx_, logits_idx_);
@@ -178,6 +176,7 @@ bool RKNNDetector::init(const std::string& model_path, rknn_core_mask core_mask)
 	output_buffers_.resize(n_output_);
 	for (int i = 0; i < n_output_; ++i)
 	{
+		// 按张量元素数预分配 float 输出缓冲：推理时 is_prealloc 复用，避免每帧 malloc/free
 		output_buffers_[i].assign(output_attrs_[i].n_elems, 0.0f);
 	}
 
@@ -211,15 +210,15 @@ bool RKNNDetector::infer_zero_copy(const DmaBufferPtr& input_buf,
 	std::vector<rknn_output> outputs(n_output_);
 	for (int i = 0; i < n_output_; ++i)
 	{
-		outputs[i].want_float = 1;   // 关键：请求 float 反量化
+		outputs[i].want_float = 1;   // 请求 float 反量化输出
 		outputs[i].index = i;
-		outputs[i].is_prealloc = 1;
+		outputs[i].is_prealloc = 1;  // 写入 init 时预分配的缓冲，免动态分配
 		outputs[i].buf = output_buffers_[i].data();
 		outputs[i].size = output_attrs_[i].n_elems * sizeof(float);
 	}
 	if (rknn_outputs_get(ctx_, n_output_, outputs.data(), NULL) < 0) return false;
 
-	// 识别 boxes 和 logits（按元素数）
+	// 从预分配缓冲中拷贝 boxes / logits 到输出向量
 	const size_t boxes_count = (size_t)boxes_attr_.n_elems;
 	const size_t logits_count = (size_t)logits_attr_.n_elems;
 	if (out_boxes.size() != boxes_count) out_boxes.resize(boxes_count);

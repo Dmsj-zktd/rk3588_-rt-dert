@@ -8,7 +8,7 @@
 //
 //     src = wrapbuffer_fd(DMA fd)  ← 物理地址，纯 DMA
 //     dst = wrapbuffer_fd(DMA fd)  ← 物理地址，纯 DMA
-//     imresize_then_cvtcolor(src, dst, BGR, RGB)  ← 单 pass 完成 resize+cvt
+//     imresize + imcvtcolor(src, dst, BGR, RGB)  ← resize + 颜色转换
 //     ↑ RGA 硬件直接 DMA 搬运，零 CPU 负载，零 IOMMU 开销
 //
 // 【性能对比】（1080p→640p，30fps）：
@@ -20,17 +20,17 @@
 //   1. 源/目标均通过 wrapbuffer_fd 包装为 rga_buffer_t
 //   2. wrapbuffer_fd 内部用 PRIME fd 查询物理地址，RGA 直接 DMA
 //   3. imcheck 预检参数合法性，避免硬件错误
-//   4. imresize_then_cvtcolor 单 pass 完成 resize + 颜色转换
+//   4. imresize + imcvtcolor 两步完成 resize + 颜色转换（板端 librga 无单指令接口）
 //   5. 同步等待 imsync 确保硬件完成（默认同步模式）
 // ============================================================================
 
 /**
- * @brief RGA 硬件加速预处理器，实现零拷贝 DMA→DMA 缩放和颜色转换。
+ * @brief RGA 硬件加速预处理器，实现零拷贝缩放和颜色转换。
  *
  * 提供三种使用模式：
- *  - DMA→DMA（主路径，最高性能）
- *  - cv::Mat→DMA（回退路径，源端走 IOMMU）
- *  - 桥接 cv::Mat→DMA（仅一次拷贝，后续走 DMA 路径）
+ *  - DMA→DMA（相机帧零拷贝主路径，最高性能）
+ *  - virt→DMA（cv::Mat 源主路径，消除 CPU resize/cvtColor）
+ *  - CPU 回退（RGA 包装失败或 stride 非整除时，按实际 stride 逐行处理）
  */
 class RgaPreprocessor
 {
@@ -54,10 +54,11 @@ class RgaPreprocessor
 		DmaBufferPtr preprocess_dma_to_dma(const DmaBufferPtr& src_buf);
 
 		/**
-		 * @brief 兼容接口：cv::Mat→DMA 预处理。
+		 * @brief cv::Mat→DMA 预处理（图像/视频文件主路径）。
 		 * @param src 输入图像（BGR）
 		 * @return 目标 DMA 缓冲（640x640 RGB）
-		 * @note 内部先将 cv::Mat 拷贝到临时 DMA，再走 DMA→DMA 路径，性能低于主路径。
+		 * @note 首选 RGA virt→DMA（源为 cv::Mat 用户态连续内存），
+		 *       失败自动回退 CPU resize+cvtColor 后紧致拷贝。
 		 */
 		DmaBufferPtr preprocess_mat_to_dma(const cv::Mat& src);
 

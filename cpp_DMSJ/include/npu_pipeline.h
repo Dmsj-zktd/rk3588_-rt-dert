@@ -64,8 +64,9 @@ class BoundedSafeQueue
 		}
 
 		/**
-		 * @brief 实时显示用：队满时丢弃最旧元素，绝不阻塞调用方（流水线）。
+		 * @brief 入队一个元素，队满时丢弃最旧元素，绝不阻塞调用方。
 		 * @param task 要推入的元素
+		 * @note 用于实时显示等低时延场景：保证最新帧优先，避免显示拖慢流水线。
 		 */
 		void push_drop_oldest(T task)
 		{
@@ -155,7 +156,7 @@ class PipelineManager
 		std::chrono::steady_clock::time_point start_time_;
 		bool started_ = false;
 
-		// 实时显示（任务 7.3）
+		// 实时显示：专用线程 + 丢旧保新队列，显示不阻塞流水线
 		std::atomic<bool> display_enabled_{false};
 		std::atomic<bool> display_quit_{false};
 		BoundedSafeQueue<cv::Mat> display_queue_;
@@ -221,7 +222,7 @@ class PipelineManager
 		void set_video_output(const std::string& path, double fps = 30.0);
 
 		/**
-		 * @brief 启用/关闭实时检测画面显示（任务 7.3）。
+		 * @brief 启用/关闭实时检测画面显示。
 		 * @param enable true 时由专用线程调用 cv::imshow + waitKey 播放检测帧。
 		 */
 		void set_display(bool enable);

@@ -105,7 +105,7 @@ PipelineManager::~PipelineManager()
 }
 
 // ============================================================================
-// 输出产物config设置
+// 输出设置（视频输出路径与帧率）
 // ============================================================================
 void PipelineManager::set_video_output(const std::string& path, double fps)
 {
@@ -130,7 +130,7 @@ void PipelineManager::push_dma_frame(int frame_id, const DmaBufferPtr& src_buf, 
 	// 【健壮性】NPU 不可用时快速丢帧，避免 reader 阻塞在满队列上无法退出
 	if (!workers_ok_.load()) return;
 
-	// fps_记录起始点_
+	// 记录 FPS 统计起始时间（首次入帧时）
 	if (!started_)
 	{
 		start_time_ = std::chrono::steady_clock::now();
@@ -145,7 +145,7 @@ void PipelineManager::push_dma_frame(int frame_id, const DmaBufferPtr& src_buf, 
 	bundle->pred_logits.resize(NUM_BOXES * NUM_CLASSES);
 	if (!orig_img.empty())
 	{
-		bundle->orig_img = orig_img.clone();   // ★ 关键：克隆图像
+		bundle->orig_img = orig_img.clone();   // 克隆原始图像用于画框/写视频（DMA 源帧会被相机回收，须先复制）
 	}
 	bundle->t_enqueue = now_us();
 	queue_raw_.push(std::move(bundle));
@@ -156,7 +156,7 @@ void PipelineManager::push_image(int frame_id, const cv::Mat& img)
 	// 【健壮性】NPU 不可用时快速丢帧，避免 reader 阻塞在满队列上无法退出
 	if (!workers_ok_.load()) return;
 
-	// fps_记录起始点_
+	// 记录 FPS 统计起始时间（首次入帧时）
 	if (!started_)
 	{
 		start_time_ = std::chrono::steady_clock::now();
@@ -165,7 +165,7 @@ void PipelineManager::push_image(int frame_id, const cv::Mat& img)
 
 	auto bundle = std::make_shared<FrameBundle>();
 	bundle->frame_id = frame_id;
-	bundle->orig_img = img.clone();   // ★ 已经 clone，但保留
+	bundle->orig_img = img.clone();   // 克隆输入图像，避免上游 cv::Mat 复用导致内容被覆写
 	bundle->use_dma_src = false;
 	bundle->pred_boxes.resize(NUM_BOXES * 4);
 	bundle->pred_logits.resize(NUM_BOXES * NUM_CLASSES);
@@ -184,8 +184,7 @@ bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
 		return false;
 	}
 
-	// 1. cv::Mat → 640x640 RGB DMA（CPU resize+cvtColor 后紧致拷贝，
-	//    与原版一致；避免 RGA 源 stride 对齐污染问题）
+	// 1. cv::Mat → 640x640 RGB DMA（RGA virt→DMA 主路径，失败自动回退 CPU）
 	DmaBufferPtr input_buf = rga_preprocessor().preprocess_mat_to_dma(src);
 	if (!input_buf)
 	{
@@ -193,7 +192,7 @@ bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
 		return false;
 	}
 
-	// 3. NPU 推理（独立 context，与视频 worker 互不影响）
+	// 2. NPU 推理（独立 context，与视频 worker 互不影响）
 	RKNNDetector detector;
 	if (!detector.init(model_path_, npu_mask_))
 	{
@@ -210,7 +209,7 @@ bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
 		return false;
 	}
 
-	// 4. 后处理解码 + 画框
+	// 3. 后处理解码 + 画框
 	std::vector<DetectResult> results = decode_rtdetr_output(
 	                                      pred_boxes.data(), pred_logits.data(),
 	                                      num_boxes, src.cols, src.rows,
@@ -338,7 +337,7 @@ void PipelineManager::worker_postprocess()
 			draw_results(bundle->orig_img, results);
 		}
 
-		// 实时显示：丢旧保新队列，避免显示阻塞拖慢流水线（任务 7.3）
+		// 实时显示：丢旧保新队列，避免显示阻塞拖慢流水线
 		if (display_enabled_.load() && !bundle->orig_img.empty())
 		{
 			display_queue_.push_drop_oldest(bundle->orig_img);
@@ -410,7 +409,7 @@ void PipelineManager::worker_postprocess()
 			          << " post=" << (total_post_us_.load() / n / 1000) << "ms"
 			          << " results=" << results.size() << "\n";
 
-			// fps_display
+			// 周期性打印实时 FPS
 			if (n % 30 == 0)
 			{
 				auto now = std::chrono::steady_clock::now();
@@ -425,7 +424,7 @@ void PipelineManager::worker_postprocess()
 }
 
 // ============================================================================
-// 实时显示线程（任务 7.3）
+// 实时显示线程
 // ============================================================================
 void PipelineManager::display_worker()
 {

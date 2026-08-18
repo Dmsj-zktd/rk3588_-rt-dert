@@ -10,8 +10,8 @@
 // 声明全局性能计数器（定义在 npu_pipeline.cc 中）
 extern PerfCounter g_perf;
 
-// RGA 调用互斥锁：librga 2.2 在并发调用（如 -p 2 预处理线程）下偶发
-// "RGA_BLIT fail: Invalid argument"，串行化 RGA 硬件调用可根治（pre 非瓶颈）。
+// RGA 调用互斥锁：librga 2.2 在并发调用（多预处理线程）下偶发
+// "RGA_BLIT fail: Invalid argument"，串行化 RGA 硬件调用可根治。
 static std::mutex g_rga_mutex;
 
 // ============================================================================
@@ -178,7 +178,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 	rga_buffer_t dst_rga = {};
 	bool src_ok = false, dst_ok = false;
 
-	// 【任务 3 迭代 2】源有效 wstride = 实际 stride / bpp。
+	// 源有效 wstride = 实际 stride / bpp。
 	// 3 字节格式下 DRM 对齐 stride（如 1360 宽 → 4096，4080%3!=0）无法被 RGA wstride(像素) 表达，
 	// 此时 src_wstride=0，跳过 RGA 包装，走下方 CPU 回退，杜绝逐行偏移污染。
 	int src_bpp = rga_format_bpp(src_buf->format);
@@ -228,8 +228,9 @@ DmaBufferPtr RgaPreprocessor::preprocess_dma_to_dma(const DmaBufferPtr& src_buf)
 
 	if (!src_ok)
 	{
-		// 【任务 3 迭代 2】安全回退：CPU 按实际 stride 逐行读取 DMA 内存完成 resize+cvtColor。
-		// 适用：源 stride 与 width*bpp 不对齐的相机 DMA→DMA 通路（如 1360 宽 BGR → stride 4096）。
+		// 安全回退：CPU 按实际 stride 逐行读取 DMA 内存完成 resize+cvtColor。
+		// 适用：源 stride 与 width*bpp 不对齐（如 1360 宽 BGR → stride 4096）时，
+		// RGA 无法以像素 wstride 表达该内存布局，走此路径杜绝逐行偏移污染。
 		dst.reset();
 		return cpu_fallback(src_buf);
 	}
@@ -321,7 +322,7 @@ DmaBufferPtr RgaPreprocessor::preprocess_mat_to_dma(const cv::Mat& src)
 		return nullptr;
 	}
 
-	// 【任务 3 优化】首选 RGA virt→DMA 硬件路径：
+	// 首选 RGA virt→DMA 硬件路径：
 	//   源 = cv::Mat 用户态连续内存（紧致 stride=width*3，RGA wstride 可精确表达），
 	//   目标 = 640x640 RGB DMA（stride=1920 == 640*3）。
 	//   消除 CPU resize/cvtColor 与 Mat→DMA 桥接 memcpy，降低 CPU 占用；

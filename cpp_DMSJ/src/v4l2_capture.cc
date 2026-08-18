@@ -127,7 +127,7 @@ bool V4l2ZeroCopyCapture::open(const std::string& device,
 // ----------------------------------------------------------------------------
 bool V4l2ZeroCopyCapture::negotiate_format()
 {
-	// 【任务 7.1】USB 摄像头（如 /dev/video41 Web Camera）常见仅支持 MJPG/YUYV。
+	// USB 摄像头（如 /dev/video41 Web Camera）常见仅支持 MJPG/YUYV。
 	// 零拷贝通路只接受无需解码的格式：优先 BGR3/RGB3（24bpp），其次 YUYV
 	// （RGA 原生支持 YUYV→RGB，保持 DMA→DMA 零拷贝）；MJPG 等压缩格式由
 	// 驱动端完成解码后再走 OpenCV 回退模式，不在此协商。
@@ -296,7 +296,7 @@ DmaBufferPtr V4l2ZeroCopyCapture::read_frame()
 	}
 
 	// 取一帧
-	// 【任务 7.1】带超时等待帧就绪：SIGTERM/SIGINT 后 DQBUF 可能因 SA_RESTART
+	// 带超时等待帧就绪：SIGTERM/SIGINT 后 DQBUF 可能因 SA_RESTART
 	// 被自动重启而永久阻塞，导致摄像头模式无法优雅退出。poll 500ms 超时返回
 	// nullptr，让主循环有机会检查退出标志。
 	struct pollfd pfd = { fd_, POLLIN, 0 };

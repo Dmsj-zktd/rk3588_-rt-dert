@@ -229,7 +229,7 @@ bool parse_args(int argc, char** argv, Args& args)
 // ============================================================================
 int run_image_mode(const Args& args, PipelineManager& pipeline)
 {
-	// 任务 4：图片优先走 GStreamer MPP JPEG 硬解，失败回退 OpenCV 软解
+	// 图片优先走 GStreamer MPP JPEG 硬解，失败回退 OpenCV 软解
 	cv::Mat img;
 	GstVideoReader gst_reader;
 	if (gst_reader.open(args.image_path))
@@ -320,7 +320,7 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline,
 	LOG(MOD_MAIN, LOG_INFO) << "V4L2 actual resolution: " << actual_w << "x" << actual_h << "\n";
 	rga_preprocessor().get_src_pool(actual_w, actual_h, cap.format());
 
-	// 如果指定了输出视频，设置输出（使用args.fps）
+	// 如果指定了输出视频，设置输出（使用 args.fps）
 	if (!args.output_path.empty())
 	{
 		pipeline.set_video_output(args.output_path, args.fps);
@@ -360,7 +360,7 @@ int run_v4l2_mode(const Args& args, PipelineManager& pipeline,
 // ============================================================================
 int run_video_mode(const Args& args, PipelineManager& pipeline)
 {
-	// 任务 4：优先 GStreamer + RK MPP 硬件解码，失败回退 OpenCV 软解
+	// 优先 GStreamer + RK MPP 硬件解码，失败回退 OpenCV 软解
 	GstVideoReader gst_reader;
 	bool use_gst = gst_reader.open(args.video_path);
 	cv::VideoCapture cap;
@@ -369,8 +369,8 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 	int frame_id = 0;
 	cv::Mat frame;
 
-	// 【任务 9】-F/--fps 显式指定时：输入侧按指定速率限速喂帧，输出侧用指定 fps 写容器；
-	// 未指定时保持现有默认（输入不限速，输出用源 fps），不影响基准性能。
+	// -F/--fps 显式指定时：输入侧按指定速率限速喂帧，输出侧用指定 fps 写容器；
+	// 未指定时保持默认行为（输入不限速，输出用源帧率）。
 	double feed_fps = (args.fps_set && args.fps > 0) ? (double)args.fps : 0.0;
 	auto feed_start = std::chrono::steady_clock::now();
 	int64_t fed_frames = 0;
@@ -384,7 +384,7 @@ int run_video_mode(const Args& args, PipelineManager& pipeline)
 
 	if (use_gst)
 	{
-		// 【任务 4 追加迭代】帧率来源：
+		// 帧率来源：
 		// - 容器/caps 提供有效帧率（CFR）→ 直接使用；
 		// - VFR 或帧率元数据缺失（如 0/1）→ 两遍法：先纯解码统计容器时长/平均帧率
 		//   （MPP 硬解，555 帧约 2-3s），再正常处理。避免"取前两帧间隔"在 VFR 源上
@@ -550,7 +550,7 @@ int main(int argc, char** argv)
 		g_should_exit = true;
 	});
 
-	// 注意：此处不再统一调用 set_video_output，而是在各个采集模式中按需调用
+	// 输出视频由各采集模式按需调用 set_video_output 设置（不在此统一处理）
 
 	// V4l2ZeroCopyCapture 必须在 PipelineManager 之前创建、之后析构：
 	// 帧的 DmaBufferPtr deleter 会向采集对象归还 buffer，若采集对象先于
