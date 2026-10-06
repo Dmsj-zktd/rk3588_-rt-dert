@@ -9,6 +9,7 @@
 #include <map>
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <opencv2/opencv.hpp>
 
 #include "types.h"
@@ -135,6 +136,8 @@ class PipelineManager
 		int               num_npu_workers_;
 		float             conf_thres_ = 0.45f;
 		rknn_core_mask    npu_mask_;          // NPU核心掩码
+		// 批量图片模式复用的独立 NPU context（懒加载：模型只在首帧加载一次）
+		std::unique_ptr<RKNNDetector> img_detector_;
 
 		// 视频输出（延迟初始化）
 		std::string       video_output_path_;
@@ -213,6 +216,19 @@ class PipelineManager
 		 * @return true 成功；false 输入为空/模型不可用/推理失败
 		 */
 		bool detect_image(const cv::Mat& src, cv::Mat& out);
+
+		/**
+		 * @brief 批量图片模式：复用同一 NPU context 的顺序单帧检测。
+		 *
+		 * 与 detect_image() 的区别：模型只在首帧 init 一次，后续帧复用同一
+		 * context，避免逐图重复加载模型；用于大规模离线评估（批量导出检测框）。
+		 * @param src     输入图片（BGR）
+		 * @param results 输出：后处理解码后的检测结果（score 为模型原始输出）
+		 * @param out     可选：绘制检测框的输出图片；传 nullptr 表示不画框
+		 * @return true 成功；false 输入为空/模型不可用/预处理或推理失败
+		 */
+		bool detect_image_reuse(const cv::Mat& src, std::vector<DetectResult>& results,
+		                        cv::Mat* out = nullptr);
 
 		/**
 		 * @brief 设置输出视频文件路径。

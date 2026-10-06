@@ -222,6 +222,62 @@ bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
 }
 
 // ============================================================================
+// 批量图片模式：复用同一 NPU context 的顺序检测（模型仅首帧加载）
+// ============================================================================
+bool PipelineManager::detect_image_reuse(const cv::Mat& src, std::vector<DetectResult>& results,
+        cv::Mat* out)
+{
+	results.clear();
+	if (src.empty())
+	{
+		LOG(MOD_PIPELINE, LOG_INFO) << "detect_image_reuse: empty input image\n";
+		return false;
+	}
+
+	// 1. 懒加载独立 context（与视频 worker 的 context 互不影响）
+	if (!img_detector_)
+	{
+		img_detector_.reset(new RKNNDetector());
+		if (!img_detector_->init(model_path_, npu_mask_))
+		{
+			LOG(MOD_PIPELINE, LOG_ERROR) << "detect_image_reuse: detector init failed\n";
+			img_detector_.reset();
+			return false;
+		}
+	}
+
+	// 2. cv::Mat → 640x640 RGB DMA（RGA virt→DMA 主路径，失败自动回退 CPU）
+	DmaBufferPtr input_buf = rga_preprocessor().preprocess_mat_to_dma(src);
+	if (!input_buf)
+	{
+		LOG(MOD_PIPELINE, LOG_ERROR) << "detect_image_reuse: preprocess failed\n";
+		return false;
+	}
+
+	// 3. NPU 推理
+	std::vector<float> pred_boxes;
+	std::vector<float> pred_logits;
+	int num_boxes = 0;
+	int num_classes = 0;
+	if (!img_detector_->infer_zero_copy(input_buf, pred_boxes, pred_logits, num_boxes, num_classes))
+	{
+		LOG(MOD_PIPELINE, LOG_ERROR) << "detect_image_reuse: inference failed\n";
+		return false;
+	}
+
+	// 4. 后处理解码（坐标已还原到原图尺寸）
+	results = decode_rtdetr_output(pred_boxes.data(), pred_logits.data(),
+	                               num_boxes, src.cols, src.rows,
+	                               conf_thres_, num_classes);
+	if (out)
+	{
+		*out = src.clone();
+		draw_results(*out, results);
+	}
+	return true;
+}
+
+// ============================================================================
 // 预处理 Worker（使用RGA零拷贝）
 // ============================================================================
 void PipelineManager::worker_preprocess()

@@ -15,7 +15,10 @@
 # 板端访问与工作规范（必须时刻遵守）
 
 ## 板端访问
-- 通过 SSH 访问板端：`ssh -i ~/.ssh/codex_board_ed25519 neardi@192.168.2.234`（端口 22）。
+- 通过 SSH 访问板端：`ssh -i ~/.ssh/codex_board_ed25519 neardi@192.168.5.103`（端口 22）。
+  - **IP 变更记录**：`192.168.2.234` → `192.168.5.103`（2026-10-06 用户通知；板端 wlan0 DHCP 动态地址，现场实测 ping 125ms RTT、SSH 正常、hostname `RK3588`）。
+  - 板端 IP 为动态地址，**每次会话开始先连通性自检**（`ping` + `ssh ... hostname`）；若不通，先向用户确认新 IP 再更新本文件。
+  - 板端↔PC 链路带宽实测约 **0.5 MB/s（PC→板）/ 0.2 MB/s（板→PC）**，大量测试数据上传前先评估耗时（详见 `METRICS.md` 2026-10-06 记录）。
 - 板端 workspace 根目录固定为 `/home/neardi/Workspace_Codex/`，**未经用户许可，不得访问或修改该目录之外的任何内容**。
 - 板端已配置 USB 摄像头（2026-08-15 起）：**设备节点 `/dev/video41`**，名称为 `Web Camera: Web Camera (usb-xhci-hcd.4.auto-1.1)`。
   - 格式能力：MJPG 1920×1080@30 / 1280×720@30 / 960×544@30 等；YUYV 1920×1080@10 / 1280×720@15 / 960×544@30 等。
@@ -26,7 +29,16 @@
 - `/home/neardi/Workspace_Codex/` 下已配置好项目（含 git 仓库、测试视频/图片、RKNN 模型）。
 - 默认测试素材：视频 `cars.mp4`、图片 `uav.jpg`。
 - 摄像头默认节点：`/dev/video41`（`-d /dev/video41`），默认请求 1280×720@30（YUYV 或 MJPG 协商）。
+  - 实测（2026-10-06）：当前程序协商结果为 **YUYV 1920×1080（stride 3840，4 buffers）**，源速率上限约 **5.1 fps**（USB2 带宽限制，AGENTS 早期记录的 720p ~10.8fps 需显式改回 720p 才可达）。
 - 当前 RKNN 模型输出**未做归一化**，置信度阈值参数的实际有效范围为 `> -1`（例如 `-c -0.13`），不要按 0~1 的常规区间假设。
+
+## mAP / 精度测试数据来源（2026-10-06 用户指示，写入记忆保存，后续复用）
+1. **板端已有素材**：`/home/neardi/Workspace_Codex/img/` 下 `cars.mp4`(720p@30)、`uav.jpg`(1360×765)、`test_people_small_little_18s.mp4`(1080p@25)、`cars-from uav_Unconventional Size_.mp4`(480×332 VFR) 等（无标注，仅可做定性/检出数对比）。
+2. **PC 端 VisDrone2019-DET 数据集**：`E:\VisDrone2019-DET\`（`VisDrone2019-DET-train` 6471 图、`-val` **548 图**（81.2 MB）、`-test-dev` **1610 图**，均带 `annotations/*.txt` 标注；**`-test-challenge` 无标注不可用**）。
+   - 标注格式：`bbox_left,bbox_top,bbox_width,bbox_height,score,category,truncation,occlusion`；`category` 1..10 与模型 10 类一一对应（1 Pedestrian … 10 Motor），`category` 0（忽略区）/11（others）与 `score=0` 行应剔除。
+   - mAP 口径：COCO 风格 101 点插值，IoU 0.50:0.05:0.95 平均 AP + AP50/AP75 + APs/APm/APl；PC 端参考值见 `UAV-DETRimp/README.md`（UAV-DETR+-R18：AP 30.6 / AP50 50.1，VisDrone-2019-DET val）。
+   - 评估脚本：本地 `visdrone_map.py`（纯 Python，无三方依赖），检测导出格式 `<stem> <class_id 0..9> <score> <x1> <y1> <x2> <y2>`。
+   - **时间预算**：用户要求单次测试 **< 8 分钟**；因板端链路仅 ~0.5 MB/s，全量 548 张 val 图上传约 2.6 分钟、批量推理约 3 分钟，接近上限，必要时取系统抽样子集并注明样本量与置信区间。
 
 ## 工作流程
 1. **先在板端本地项目上迭代**，达成特定指标需求后，再上传/提交仓库并同步本地。
