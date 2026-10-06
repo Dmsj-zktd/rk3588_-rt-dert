@@ -2,6 +2,8 @@
 #include <cmath>
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
+#include <cctype>
 
 // ============================================================================
 // 类别固定调色板（BGR，10 类 VisDrone）
@@ -23,6 +25,110 @@ const cv::Scalar kClassColors[NUM_CLASSES] = {
 	cv::Scalar(255, 255, 0)     // Motor          - 天蓝
 };
 }   // namespace
+
+// ============================================================================
+// 按类置信度阈值：配置解析与预设档位
+// ============================================================================
+namespace
+{
+//!< 按类标定向量（VisDrone-2019-DET val 全量 548 张、IoU≥0.5、F1 最大准则）
+const float kRecallProfile[NUM_CLASSES] = {
+	-0.40f,   // Pedestrian
+	-0.70f,   // People
+	-0.90f,   // Bicycle
+	0.00f,    // Car
+	-0.25f,   // Van
+	-0.30f,   // Truck
+	-0.70f,   // Tricycle
+	-0.80f,   // Awning-tricycle
+	-0.05f,   // Bus
+	-0.55f    // Motor
+};
+
+std::string trim(const std::string& s)
+{
+	size_t b = 0, e = s.size();
+	while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+	while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+	return s.substr(b, e - b);
+}
+
+bool parse_float_strict(const std::string& s, float& out)
+{
+	std::string t = trim(s);
+	if (t.empty()) return false;
+	char* end = nullptr;
+	out = std::strtof(t.c_str(), &end);
+	return end != nullptr && *end == '\0';
+}
+
+bool parse_int_strict(const std::string& s, int& out)
+{
+	std::string t = trim(s);
+	if (t.empty()) return false;
+	char* end = nullptr;
+	long v = std::strtol(t.c_str(), &end, 10);
+	if (end == nullptr || *end != '\0') return false;
+	out = (int)v;
+	return true;
+}
+}   // namespace
+
+bool parse_conf_class(const std::string& spec, ConfConfig& cfg, std::string* err)
+{
+	auto fail = [&](const std::string& m)
+	{
+		if (err) *err = m;
+		return false;
+	};
+	if (trim(spec).empty()) return fail("--conf-class 规格为空");
+
+	std::string cur;
+	bool any = false;
+	std::string input = spec + ",";
+	for (char ch : input)
+	{
+		if (ch == ',' || ch == ';')
+		{
+			std::string item = trim(cur);
+			cur.clear();
+			if (item.empty()) continue;
+			size_t colon = item.find(':');
+			if (colon == std::string::npos) return fail("缺少 ':' 分隔符: " + item);
+			int cls = -1;
+			float thr = 0.0f;
+			if (!parse_int_strict(item.substr(0, colon), cls)) return fail("类别非法: " + item);
+			if (!parse_float_strict(item.substr(colon + 1), thr)) return fail("阈值非法: " + item);
+			if (cls < 0 || cls >= NUM_CLASSES) return fail("类别越界（需 0~9）: " + item);
+			cfg.per_class[cls] = thr;
+			any = true;
+			continue;
+		}
+		cur.push_back(ch);
+	}
+	if (!any) return fail("未解析到任何 <class:thr> 项");
+	cfg.per_class_set = true;
+	return true;
+}
+
+bool apply_conf_profile(const std::string& name, float base, ConfConfig& cfg, std::string* err)
+{
+	if (name == "balanced")
+	{
+		cfg.reset(base);
+		cfg.per_class_set = false;      // 等价于原全局阈值行为
+		return true;
+	}
+	if (name == "recall")
+	{
+		cfg.reset(base);
+		for (int i = 0; i < NUM_CLASSES; ++i) cfg.per_class[i] = kRecallProfile[i];
+		cfg.per_class_set = true;
+		return true;
+	}
+	if (err) *err = "未知档位（支持 balanced / recall）: " + name;
+	return false;
+}
 
 // ============================================================================
 // 自适应画框样式
@@ -47,7 +153,8 @@ std::vector<DetectResult> decode_rtdetr_output(float* boxes_data,
         int num_boxes,
         int orig_w, int orig_h,
         float conf_thres,
-        int /* num_classes */)
+        int /* num_classes */,
+        const ConfConfig* conf_cfg)
 {
 	const int nc = NUM_CLASSES;   // 强制使用 10 类
 	std::vector<DetectResult> results;
@@ -70,7 +177,9 @@ std::vector<DetectResult> decode_rtdetr_output(float* boxes_data,
 			}
 		}
 
-		if (max_score < conf_thres) continue;
+		// 按类阈值（未启用时类内阈值等于全局 conf_thres，行为与旧版一致）
+		const float thr = conf_cfg ? conf_cfg->threshold_for(max_class_id) : conf_thres;
+		if (max_score < thr) continue;
 
 		// 反归一化坐标（乘以原图尺寸）
 		float cx = box_ptr[0] * orig_w;

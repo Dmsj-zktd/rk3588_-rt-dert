@@ -13,6 +13,7 @@
 #include <opencv2/opencv.hpp>
 
 #include "types.h"
+#include "postprocess.h"
 #include "rknn_detector.h"
 #include "rknn_api.h"
 #include "gst_io.h"
@@ -136,6 +137,9 @@ class PipelineManager
 		int               num_npu_workers_;
 		float             conf_thres_ = 0.45f;
 		rknn_core_mask    npu_mask_;          // NPU核心掩码
+		// 置信度阈值配置（全局 + 可选按类）；默认 conf_cfg_set_=false → 行为与旧版一致
+		ConfConfig        conf_cfg_;
+		bool              conf_cfg_set_ = false;
 		// 批量图片模式复用的独立 NPU context（懒加载：模型只在首帧加载一次）
 		std::unique_ptr<RKNNDetector> img_detector_;
 
@@ -229,6 +233,22 @@ class PipelineManager
 		 */
 		bool detect_image_reuse(const cv::Mat& src, std::vector<DetectResult>& results,
 		                        cv::Mat* out = nullptr);
+
+		/**
+		 * @brief 设置置信度阈值配置（全局 + 可选按类阈值）。
+		 *
+		 * 传入后对全部解码路径（视频 worker / 单图 / 批量图片）生效；
+		 * 不调用则保持 `-c/--conf` 的全局阈值行为。
+		 * @param cfg 阈值配置（见 postprocess.h 的 ConfConfig）
+		 */
+		void set_conf_config(const ConfConfig& cfg)
+		{
+			conf_cfg_ = cfg;
+			conf_cfg_set_ = true;
+		}
+
+		//!< 当前按类阈值配置是否已启用（供日志/报告使用）
+		const ConfConfig& conf_config() const { return conf_cfg_; }
 
 		/**
 		 * @brief 设置输出视频文件路径。

@@ -11,6 +11,7 @@
 #include <csignal>
 #include <cstring>
 #include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <opencv2/opencv.hpp>
 
@@ -53,6 +54,8 @@ struct Args
 	int  post_workers = 1;
 	int  queue_cap    = 16;
 	float conf        = 0.45f;
+	std::string conf_class;   //!< --conf-class：按类阈值规格串（如 "0:-0.40,3:0.00"）
+	std::string profile;      //!< --profile：阈值预设档位（balanced / recall）
 	int  debug        = -1;   // -G/--DEBUG：-1 表示未指定（默认全模块）
 	bool use_v4l2     = true;
 	bool show_fps     = true;
@@ -78,6 +81,8 @@ void print_usage(const char* prog)
 	          << "  -F, --fps <n>           Override input/output fps (video file & camera; default: auto/source)\n"
 	          << "  -o, --output <path>     Output video path (default: none)\n"
 	          << "  -c, --conf <f>          Confidence threshold (default: 0.45)\n"
+	          << "  --conf-class <spec>     Per-class thresholds, e.g. \"0:-0.40,3:0.00,9:-0.55\"\n"
+	          << "  --profile <name>        Threshold preset: balanced (global, default) | recall (class-wise calibrated)\n"
 	          << "  -n, --npu-workers <n>   NPU workers (default: 3)\n"
 	          << "  -p, --pre-workers <n>   Preprocess workers (default: 2)\n"
 	          << "  -P, --post-workers <n>  Postprocess workers (default: 1)\n"
@@ -155,6 +160,14 @@ bool parse_args(int argc, char** argv, Args& args)
 		else if (arg == "-c" || arg == "--conf")
 		{
 			args.conf = std::stof(get_val("conf"));
+		}
+		else if (arg == "--conf-class")
+		{
+			args.conf_class = get_val("conf-class");
+		}
+		else if (arg == "--profile")
+		{
+			args.profile = get_val("profile");
 		}
 		else if (arg == "-n" || arg == "--npu-workers")
 		{
@@ -661,6 +674,46 @@ int main(int argc, char** argv)
 	                         args.model_path,
 	                         args.queue_cap, args.conf, args.npu_mask);
 	pipeline.set_display(args.show_display);
+
+	// 置信度阈值配置：全局 -c，可用 --profile / --conf-class 覆盖为按类阈值
+	// （默认不启用按类阈值 → 与旧版本行为完全一致）
+	{
+		ConfConfig conf_cfg;
+		conf_cfg.reset(args.conf);
+		if (!args.profile.empty())
+		{
+			std::string err;
+			if (!apply_conf_profile(args.profile, args.conf, conf_cfg, &err))
+			{
+				LOG(MOD_MAIN, LOG_ERROR) << "Error: " << err << "\n";
+				return 1;
+			}
+		}
+		if (!args.conf_class.empty())
+		{
+			std::string err;
+			if (!parse_conf_class(args.conf_class, conf_cfg, &err))
+			{
+				LOG(MOD_MAIN, LOG_ERROR) << "Error: " << err << "\n";
+				return 1;
+			}
+		}
+		pipeline.set_conf_config(conf_cfg);
+		if (conf_cfg.per_class_set)
+		{
+			std::ostringstream oss;
+			oss << "Per-class confidence: global=" << conf_cfg.global;
+			for (int c = 0; c < NUM_CLASSES; ++c)
+			{
+				oss << " " << CLASSES[c] << "=" << conf_cfg.per_class[c];
+			}
+			LOG(MOD_MAIN, LOG_INFO) << oss.str() << "\n";
+		}
+		else
+		{
+			LOG(MOD_MAIN, LOG_INFO) << "Confidence threshold (global): " << conf_cfg.global << "\n";
+		}
+	}
 	pipeline.set_quit_callback([]()
 	{
 		g_should_exit = true;

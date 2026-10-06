@@ -213,7 +213,8 @@ bool PipelineManager::detect_image(const cv::Mat& src, cv::Mat& out)
 	std::vector<DetectResult> results = decode_rtdetr_output(
 	                                      pred_boxes.data(), pred_logits.data(),
 	                                      num_boxes, src.cols, src.rows,
-	                                      conf_thres_, num_classes);
+	                                      conf_thres_, num_classes,
+	                                      conf_cfg_set_ ? &conf_cfg_ : nullptr);
 	out = src.clone();
 	draw_results(out, results);
 
@@ -268,7 +269,8 @@ bool PipelineManager::detect_image_reuse(const cv::Mat& src, std::vector<DetectR
 	// 4. 后处理解码（坐标已还原到原图尺寸）
 	results = decode_rtdetr_output(pred_boxes.data(), pred_logits.data(),
 	                               num_boxes, src.cols, src.rows,
-	                               conf_thres_, num_classes);
+	                               conf_thres_, num_classes,
+	                               conf_cfg_set_ ? &conf_cfg_ : nullptr);
 	if (out)
 	{
 		*out = src.clone();
@@ -386,7 +388,8 @@ void PipelineManager::worker_postprocess()
 		                                        bundle->orig_img.cols,
 		                                        bundle->orig_img.rows,
 		                                        conf_thres_,
-		                                        bundle->num_classes);
+		                                        bundle->num_classes,
+		                                        conf_cfg_set_ ? &conf_cfg_ : nullptr);
 
 		if (!bundle->orig_img.empty())
 		{
