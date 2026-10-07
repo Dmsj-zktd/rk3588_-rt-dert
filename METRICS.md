@@ -507,3 +507,51 @@
 | test-dev 202：`--profile recall` | 3 194 | 3 221 | 0.4979 | **0.3339** | 0.3997 | **0.2947（+11.0%）** |
 
 - val 上 **10/10 类 F1 上升**（+0.004~+0.072），9/10 类召回上升（Car 因阈值收紧召回 −1.4 pp 但 F1 +0.006）；test-dev 增益更大且方向一致 ⇒ 标定未过拟合。
+
+## 2026-10-07 INT8 重校准实验（任务12，详见 `标准分析表_[2026-10-07-02].md`）
+
+### 1) 架构来源（`UAV-DETRimp/ultralytics/cfg/models/UAV-DETR+-R18_VisDrone.yaml`）
+
+- ResNet18 主干（ConvNormLayer + BasicBlock[64/128/256/512]）+ AIFI(1024,8) + DySample + RepC3 + WTConv2d/WTConv2dMaxPool + SEcatv2 + FFC + MFFF + SemanticAlignmenCalibration + `RTDETRDecoder(nc=10,256,300,4,8,3)`；10 类与部署 `CLASSES` 同序。
+- **预处理源码证据**：`rtdetr/predict.py: LetterBox(imgsz, auto=False, scaleFill=True)`、`rtdetr/val.py: v8_transforms(..., stretch=True)` ⇒ 训练/验证即"**拉伸到 640×640**"，与部署一致（letterbox 反而更差的配对实验得到解释）。
+
+### 2) 重校准矩阵（板端 548 张 val，同一后处理与忽略区规则，performance governor）
+
+| 模型 | 校准集 / 设置 | AP | AP50 | AP75 | 批量吞吐 |
+|------|----------------|-----|------|------|----------|
+| `rtdetr_i8.rknn`（部署原版） | 原 20 张子集 | 9.47 | 23.58 | 5.98 | 4.57 img/s |
+| `rtdetr_i8_cal20` | 20 张 train | 10.13 | 24.07 | 7.21 | 4.57 |
+| `rtdetr_i8_cal100` | 100 张 train | 9.77 | 23.70 | 6.58 | 4.71 |
+| `rtdetr_i8_ch_cal100` | 100 张 + `quantized_method=channel` | 9.77 | 23.70 | 6.58 | 4.80 |
+| `rtdetr_i8_cal309` | 309 张 train | 9.52 | 23.01 | 6.32 | 4.57 |
+| `rtdetr_i8_cal309_opt1` | 309 张 + `optimization_level=1` | 9.52 | 22.99 | 6.30 | 4.68 |
+| **`uav-detr_fp16.rknn`** | FP16 | **20.96** | **36.59** | **20.81** | 2.72 |
+
+> 结论：**校准集规模/域、per-channel、优化器档位均无效**（AP50 全在 23.0–24.1）；**唯一显著提升是 FP16（+11.49 AP / +13.01 AP50）**，代价 4.57→2.72 img/s。
+
+### 3) 视频吞吐与 FP16 代价（cars.mp4 720p，performance governor）
+
+| 模型 | 配置 | Overall FPS | CPU% |
+|------|------|-------------|------|
+| INT8（部署） | -n 8 | 15.43 | 334 |
+| FP16 | -n 8 | 10.02 | 365 |
+| FP16 | -n 14 | 10.59 | 458 |
+
+> 摄像头通路实采上限 5.1 fps ⇒ 摄像头场景切 FP16 零代价、精度翻倍。
+
+### 4) 逐层截断率分析（量化损失定位，965 张量 cfg）
+
+- 定义 clip = 1 − 量化区间/观测区间；906 个 int8 层：中位 **0.000**、均值 0.0146，**16 层 >0.5、30 层 >0.25**。
+- Top 截断层：主干 `model.2/1/0` 卷积（0.63/0.54/0.51）、ResNet 残差 Add 与 branch Conv（model.4~7，0.43–0.53）、**decoder FFN `linear1` Gemm（0.61–0.62）、`enc/dec_bbox_head` Gemm（0.44–0.60）**。
+- 最差 50 层算子构成：Gemm 16、Conv 11、Add 10、MatMul 5、Transpose 3…⇒ **受损集中在小目标回归头/FFN 与早期主干**，与"AP75 保留率仅 28.7%"因果一致；注意力并非主因。
+
+### 5) Hybrid 混合精度尝试（阻塞）
+
+- `hybrid_quantization_step1` 成功（产出 `.data` + `.quantization.cfg`）。
+- `hybrid_quantization_step2` **在自定义 fp16 层与"未修改原始 cfg"两种情况下均失败**：`KeyError: '/model.26/Squeeze_1_output_0'`（`quant_optimizer._p_adjust_tanh_sigmoid`）；该内部层名在 cfg 中不存在（cfg 为 `onnx::Squeeze_4365`）⇒ toolkit 2.3.2 与本图的命名不一致，**与非所选层无关**。
+
+### 6) 环境与流程
+
+- **VM 环境修复**：`toolkit2` 环境 numpy 2.2.6 与 `rknn-toolkit2 2.3.2`（要求 numpy<=1.26.4）冲突 → `onnxruntime` 报 `_ARRAY_API not found`、`rknn.build` 失败；已回退 **numpy 1.26.4**，转换恢复正常。
+- **转换加速**：rknn 量化主循环基本单线程（单进程 ~1.15/8 核）；采用**多配置并行 build** 把 CPU 利用率提到 ~3.2 核；并行配置（opt1 / per-channel / hybrid step1 / cal100）总耗时显著缩短。单次 build 墙钟无法靠加线程大幅压缩。
+- **时钟事故（有效对照）**：板子重启后 performance governor 被重置为 ondemand（DMC 528 vs 2112 MHz），同模型批量吞吐 4.57 → **1.56 img/s（−66%）**，恢复后又回到 4.57–4.80 ⇒ 再次印证**访存受限**；复核性能前必须先确认 governor。
