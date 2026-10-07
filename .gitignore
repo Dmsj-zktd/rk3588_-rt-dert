@@ -6,3 +6,7 @@
 build/
 *.o
 *.so.bak
+
+# Python 缓存
+__pycache__/
+*.pyc
