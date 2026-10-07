@@ -39,6 +39,13 @@
 - **用户新规（2026-10-07）**：**所有 `标准分析表_*.md` 不入版本库**。执行：新增 `.gitignore`（`标准分析表*.md`），并将任务10 已入库的 3 份报告在 `52b7816` 中 `git rm --cached` 剔除（文件保留在工作区，历史中仍可回溯 `c27c8d1`）；此后新增的报告（`_2026-10-07-01`）自始未入库。
 - **板端同步**：README/METRICS/TODOlist/AGENTS/对话上下文摘要 + 4 份标准分析表 + `tools/*.py` 已同步至 `/home/neardi/Workspace_Codex/rk3588_-rt-detr/`；板端仓库同样新增 `.gitignore` 忽略 `标准分析表*.md`，报告仅作为本地分析产物存放、不入板端版本库。
 
+### 2026-10-07 任务12 上传入库记录
+
+- **commit `993538a`（2026-10-07 推送 gitee）**：入库本批 = `METRICS.md`（新增任务12 六节：架构来源/重校准矩阵/视频吞吐/逐层截断率/hybrid 阻塞/环境与流程）+ `TODOlist.md` + `tools/clip_analysis.py`（逐层截断分析工具）+ `tools/quantization.cfg`（实测 965 张量量化参数）。
+- **不入库**：`标准分析表_[2026-10-07-02].md`（按用户规则由 `.gitignore` 排除；远端 `ls-tree` 校验为空）。
+- 实验产物位置：虚拟机 `~/Workspace_Codex/exp/*.rknn`（cal20/cal100/cal309/cal309_opt1/ch_cal100）+ 板端同名目录；`~/Workspace_Codex/best_rtdetr_npu.quantization.cfg`；校准集 `~/Workspace_Codex/calib/`（309 张 train）。
+- **主模型未被替换**：板端 `rtdetr_i8.rknn` 仍为原部署模型；FP16（`uav-detr_fp16.rknn`）与各实验 INT8 模型通过 `-m` 参数按需切换。
+
 ### 2026-10-06 任务10 完成（mAP 批量评测 + 报告交付）
 
 - 用户批准板端写操作（上传 VisDrone val + 最小增量开关 + 重新编译 + 测试产物）。
