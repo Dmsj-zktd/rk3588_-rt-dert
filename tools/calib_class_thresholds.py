@@ -76,17 +76,31 @@ def main():
     ap_.add_argument("--lo", type=float, default=-0.75)
     ap_.add_argument("--hi", type=float, default=0.25)
     ap_.add_argument("--step", type=float, default=0.05)
+    ap_.add_argument("--ignore-regions", action="store_true")
     a = ap_.parse_args()
 
     dets = M.load_dets(a.det)
     stems = sorted(dets.keys())
     gt, ign = M.load_gt(a.ann, stems)
+    if a.ignore_regions:
+        filtered = defaultdict(list)
+        for stem, detections in dets.items():
+            regions = ign.get(stem, [])
+            for class_id, score, box in detections:
+                if regions and M.in_ignored(box, regions):
+                    continue
+                filtered[stem].append((class_id, score, box))
+        dets = filtered
     n = int(round((a.hi - a.lo) / a.step))
     thrs = [round(a.lo + i * a.step, 4) for i in range(n + 1)]
 
     print("images=%d  thresholds=%s" % (len(dets), thrs))
     best = {}
-    print("\n== per-class F1 sweep (IoU>=0.5, argmax class, ignore-region rule OFF) ==")
+    ignore_state = "ON" if a.ignore_regions else "OFF"
+    print(
+        "\n== per-class F1 sweep "
+        f"(IoU>=0.5, argmax class, ignore-region rule {ignore_state}) =="
+    )
     for c in range(10):
         row = []
         for t in thrs:

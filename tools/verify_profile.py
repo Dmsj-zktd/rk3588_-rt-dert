@@ -16,11 +16,51 @@ def main():
     ap.add_argument("--det", required=True)
     ap.add_argument("--ann", required=True)
     ap.add_argument("--iou", type=float, default=0.5)
+    ap.add_argument("--global-conf", type=float)
+    ap.add_argument(
+        "--conf-class",
+        help="Optional per-class thresholds, e.g. 0:-0.50,3:-0.10",
+    )
+    ap.add_argument("--ignore-regions", action="store_true")
     a = ap.parse_args()
 
     dets = M.load_dets(a.det)
     stems = sorted(dets.keys())
-    gt, _ = M.load_gt(a.ann, stems)
+    gt, ign = M.load_gt(a.ann, stems)
+    class_thresholds = {}
+    if a.conf_class:
+        for item in a.conf_class.split(","):
+            class_id, threshold = item.split(":", 1)
+            class_thresholds[int(class_id)] = float(threshold)
+    thresholds = {
+        class_id: class_thresholds.get(class_id, a.global_conf)
+        for class_id in range(10)
+    }
+
+    if a.ignore_regions or any(value is not None for value in thresholds.values()):
+        filtered = defaultdict(list)
+        for stem, detections in dets.items():
+            ignored_regions = ign.get(stem, [])
+            for class_id, score, box in detections:
+                if class_id not in thresholds:
+                    continue
+                threshold = thresholds[class_id]
+                if threshold is not None and score < threshold:
+                    continue
+                if a.ignore_regions and ignored_regions:
+                    if M.in_ignored(box, ignored_regions):
+                        continue
+                filtered[stem].append((class_id, score, box))
+        dets = filtered
+
+    print(
+        "thresholds="
+        + ",".join(
+            f"{class_id}:{threshold:+.3f}"
+            for class_id, threshold in thresholds.items()
+            if threshold is not None
+        )
+    )
     npos = sum(len(gt[s][c]) for s in gt for c in gt[s])
 
     tp = fp = 0

@@ -489,6 +489,67 @@ chmod +x test_robustness.sh
 
 ---
 
+## 任务15：RKNN auto-hybrid INT8 精度恢复（2026-10-25）
+
+### 15.1 结论与模型选型
+
+在 RKNN-Toolkit2 2.3.2 中使用 100 张 VisDrone train 同域图片校准、per-channel、`auto_hybrid=True`、`cos_threshold=0.90`，可在保留 INT8 主导部署形式的同时恢复接近 FP16 的精度。
+
+| 模型 | AP | AP50 | AP75 | FPS（1080p, n8） | 模型体积 |
+|------|----|------|------|------------------|----------|
+| 论文 UAV-DETR+-R18（FP32） | 0.3060 | 0.5010 | — | — | — |
+| FP16 RKNN | **0.2096** | **0.3659** | **0.2081** | 10.02 | 55.68 MB |
+| 原纯 INT8 | 0.0947 | 0.2358 | 0.0598 | **15.36** | **32.30 MB** |
+| **auto-hybrid c0.90** | **0.2076** | **0.3651** | **0.2055** | **13.00±0.05** | **36.66 MB** |
+| auto-hybrid c0.98 | 0.2077 | 0.3651 | 0.2059 | 12.83 | 42.18 MB |
+| auto-hybrid 2.5.0 | 0.2080 | 0.3646 | 0.2044 | 12.42 | 35.46 MB |
+
+- c0.90 相对原纯 INT8 提升 AP **+11.29 点**、AP50 **+12.93 点**、AP75 **+14.57 点**；相对 FP16 保留 AP/AP50/AP75 **99.0%/99.8%/98.8%**。
+- c0.85 的 AP 骤降至 **0.1004**，属于量化精度悬崖；c0.90 是当前精度、体积与 FPS 的最佳综合拐点。
+- c0.90 相对 c0.98 仅低 0.01 AP，但体积缩小 **13.1%**、FPS 提高约 **1.3%**。
+- 主部署文件尚未替换；候选模型通过 `-m` 选择：
+
+```bash
+-m /home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/experiments_20261025/rtdetr_i8_auto_channel_c090.rknn
+```
+
+### 15.2 阈值与召回率
+
+| 模型 / 策略 | Precision | Recall | F1 | 宏 F1 |
+|-------------|-----------|--------|----|-------|
+| 纯 INT8，全局 −0.13 | 0.5904 | 0.3589 | 0.4464 | 0.3185 |
+| auto-hybrid c0.90，全局 −0.13 | **0.7979** | 0.4687 | 0.5905 | 0.4035 |
+| auto-hybrid c0.90，全局 −0.53 | 0.6615 | **0.5611** | **0.6072** | 0.4458 |
+| auto-hybrid c0.90，按类标定 | 0.6602 | 0.5550 | 0.6030 | **0.4624** |
+
+按类阈值向量（类别顺序：Pedestrian、People、Bicycle、Car、Van、Truck、Tricycle、Awning-tricycle、Bus、Motor）：
+
+```text
+--conf-class "0:-0.55,1:-0.65,2:-1.50,3:-0.10,4:-0.45,5:-0.40,6:-0.90,7:-0.65,8:-0.15,9:-0.50"
+```
+
+- val 548 张上，按类阈值相对 −0.13 提升宏 F1 **14.6%**。
+- test-dev 固定 202 张外部验证中，宏 F1 从 0.3332 提升到 **0.3833（+15.0%）**，增益方向与 val 一致。
+- 若下游对误报更敏感，优先使用全局 `-0.53`；若更重视稀有类召回和类别均衡，使用按类阈值。
+
+### 15.3 转换与阈值工具
+
+| 工具 | 用途 |
+|------|------|
+| `tools/convert_rknn_variant.py` | 通用 ONNX→RKNN 量化实验入口，支持 auto-hybrid、cos/euc 阈值、per-channel、规则禁用等参数 |
+| `tools/run_hybrid_step1.py` / `run_hybrid_step2.py` | 复现旧版手工 hybrid 两步流程及失败边界 |
+| `tools/probe_onnx_squeeze.py` | 定位 ONNX `Squeeze` 节点与邻接关系 |
+| `tools/prune_rtdetr_outputs.py` | 裁剪 RT-DETR 冗余尾部输出 |
+| `tools/export_rtdetr_split_head.py` | 导出 box/score 分离头，用于 split 实验 |
+| `tools/alias_quant_cfg.py` | 量化 cfg 张量名映射诊断 |
+| `tools/bench_subprocess.py` | 统一采集 wall time、CPU 利用率与峰值 RSS |
+| `tools/calib_class_thresholds.py` | 逐类阈值扫描，支持 VisDrone ignored-region |
+| `tools/verify_profile.py` | 验证全局/按类阈值工作点的 P/R/F1 与宏 F1 |
+
+完整阈值分析见 `阈值调控检全提升对比_[2026-10-25-01].md`。split ONNX 虽能编译，但运行时输出语义被破坏（`detects=0`），不可部署；`w8a16`、`gdq` 在 RK3588 不支持，`compress_weight=True` 仅减少 128 B。
+
+---
+
 ## 任务16：板端高性能模式核验与稳定启动（2026-10-25）
 
 ### 16.1 当前状态
