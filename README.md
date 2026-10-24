@@ -486,3 +486,35 @@ chmod +x test_robustness.sh
 | `tools/onnx_dump.py` | FP32 ONNX 同管线推理与检测导出 |
 | `tools/verify_profile.py` | 阈值档位工作点评估（逐类 P/R/F1 + 宏平均） |
 | `tools/val548_detections_fp32.txt.gz` / `_fp16.txt.gz` / `_recall.txt.gz` / `_balanced.txt.gz` | 归因与优化验证的原始检测导出，可离线复算 |
+
+---
+
+## 任务16：板端高性能模式核验与稳定启动（2026-10-25）
+
+### 16.1 当前状态
+
+板端 `192.168.5.103` 的计算热路径均处于当前内核暴露的最高受支持 OPP：
+
+| 域 | governor | 当前频率 | 最高可用频率 |
+|----|----------|----------|--------------|
+| CPU A55 / `policy0` | performance | 1.800 GHz | 1.800 GHz |
+| CPU A76 / `policy4` | performance | 2.256 GHz | 2.256 GHz |
+| CPU A76 / `policy6` | performance | 2.256 GHz | 2.256 GHz |
+| NPU | performance | 1.000 GHz | 1.000 GHz |
+| DMC | performance | 2.112 GHz | 2.112 GHz |
+
+- 当前 sysfs 不再暴露旧记录中的 A76 `2.352 GHz`；本次以实测最高 OPP **2.256 GHz** 为准。
+- 不存在可合法开启的更高 CPU/NPU/DMC 档位；`userspace` 锁频不能超过硬件 OPP，关闭热保护、改电压或非官方超频不在支持范围内。
+- GPU 保持 `simple_ondemand`，VOP 保持 `vop2_ondemand`。两者临时锁最高档后的视频吞吐为 **12.804 FPS**，默认档为 **12.829±0.015 FPS（n=4）**，无收益，已恢复默认。
+- 空载 SoC/CPU/GPU/NPU 约 **49.9–55.5°C**；高负载短测约 **67.5°C**，低于 **75/85°C** 被动降频点和 **115°C** critical，未发现限频日志。
+
+### 16.2 启动与核验
+
+高性能状态不会在重启后自动持久化。每次重启或进入新的测试会话后执行：
+
+```bash
+cd /home/neardi/Workspace_Codex/rk3588_-rt-detr
+./tools/rk3588_performance.sh
+```
+
+脚本会幂等设置 CPU×3、NPU、DMC 五个 governor，校验 `current_freq == max_freq`，并打印各热区温度；任一计算域未达到最高 OPP 时以非零状态退出。PC 仓库对应文件为 `tools/rk3588_performance.sh`。

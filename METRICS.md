@@ -354,6 +354,7 @@
 ### 环境与口径
 
 - 板端 IP 变更为 `192.168.5.103`（wlan0 DHCP）；kernel 6.1.118；RAM 7 917 MiB；NPU 3 核 @1.0 GHz；DMC @2112 MHz；CPU policy0/4/6 = 1.8/2.256/2.352 GHz。
+  - **2026-10-25 复核修正**：当前 sysfs 的 policy6 `cpuinfo_max_freq` 与最高 available OPP 均为 **2.256 GHz**，未再暴露 2.352 GHz；以当前实测 OPP 为准，旧记录保留作历史。
 - governor 全部 `performance`（CPU×3 + NPU + DMC），测试前后复核一致；运行中实测 CPU 频率维持最高档，未见降频。
 - 板端二进制：`cpp_DMSJ/build/rtdetr_pipeline`（2026-08-16 15:10 构建；源码与本地 master `83fb1dd` 逐行一致，仅注释措辞差异）。
 - 模型：`models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn`（INT8，输入 1×640×640×3 INT8/NHWC，5 个输出张量）。
@@ -599,3 +600,22 @@
 - 独立克隆环境 `toolkit2_old`（`conda create --clone toolkit2` + `pip install rknn-toolkit2==2.3.0`，**不影响在用 2.3.2 环境**）。
 - 四种组合全部失败：D1 用 2.3.2 的 cfg 在 2.3.0 下 → `ValueError: config of step2 inconsistent with step1`（提示 step2 前勿再 `config()`）；D2 去掉 `config()` → 同一 `KeyError: '/model.26/Squeeze_1_output_0'`；**D3 在 2.3.0 内自跑 step1 → step2（不加任何自定义层）→ 同一 KeyError**；D4 按截断率选 30 层 fp16 → 同一 KeyError。
 - **定论**：与 toolkit 版本、与是否自定义 fp16 层**均无关**，属 **ONNX 导出图（`export.py` 产物）与 hybrid 通道的层名不一致**；修复只能从**导出侧改造**或走 QAT。因此"以 INT8 速度换回精度"在本工程当前链路不可行，落地建议维持 FP16。
+
+## 2026-10-25 板端高性能状态核验
+
+在板端 `192.168.5.103` 的当前 sysfs 实测：
+
+| 域 | governor | 当前频率 | 可用最高频率 | 结论 |
+|----|----------|----------|--------------|------|
+| CPU A55（policy0） | performance | 1.800 GHz | 1.800 GHz | 已满频 |
+| CPU A76（policy4） | performance | 2.256 GHz | 2.256 GHz | 已满频 |
+| CPU A76（policy6） | performance | 2.256 GHz | 2.256 GHz | 已满频 |
+| NPU | performance | 1.000 GHz | 1.000 GHz | 已满频 |
+| DMC | performance | 2.112 GHz | 2.112 GHz | 已满频 |
+| GPU | simple_ondemand | 0.300 GHz | 1.000 GHz | 非 NPU 热路径 |
+| VOP | vop2_ondemand | 0.750/0.850 GHz | 0.850 GHz | 仅显示路径 |
+
+- **更高计算档位不存在**：CPU/NPU/DMC 的 `performance` 均已落在受支持 OPP 最大值；`userspace` 最高锁频也不会超过该值。禁止关闭热保护或使用非官方超频。
+- **GPU/VOP 极限档 A/B 无效**：临时设置 GPU/VOP 为 `performance`（1.000/0.850 GHz）后，auto-hybrid 视频为 **12.804 FPS**；默认 governor 下为 **12.829±0.015 FPS**（n=4），差异落在噪声内。已恢复 GPU=`simple_ondemand`、VOP=`vop2_ondemand`。
+- **负载状态**：auto-hybrid 视频运行中三 NPU 核负载为 **90%/87%/86%**（复测 90%/88%/80%），CPU/NPU/DMC 频率保持最高档；SoC/NPU 温度由空载约 **52.7–55.5°C** 升至 **67.5/65.6°C**，仍低于 **75/85°C** 被动降频点，critical 为 **115°C**；未发现限频日志。
+- **启动状态**：当前登录会话已激活计算高性能档，但该设置不持久化到开机自启；每次重启/重新登录后须按 AGENTS 的五条 governor 命令恢复。

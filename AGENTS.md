@@ -95,6 +95,15 @@ sudo sh -c 'echo performance > /sys/class/devfreq/dmc/governor'
 
 > 注意：不写入系统自启，仅每次登录后由 Codex 手动执行。
 
+## 高性能状态核验（2026-10-25）
+
+- **计算热路径已激活最高受支持档位**：A55 `policy0=1.800 GHz`、A76 `policy4/6=2.256 GHz`、NPU `1.000 GHz`、DMC `2.112 GHz`；四项均为 sysfs `available_frequencies` 的最高值。
+- **不存在更快的受支持计算档位**：以上 governor 均为 `performance`，继续使用 `userspace` 锁频不会超过硬件 OPP 上限；禁止通过关闭热保护、改电压或非官方超频追求更高频率。
+- **GPU/VOP 不属于当前 NPU 检测热路径**：GPU 默认 `simple_ondemand`（300/1000 MHz）、VOP 默认 `vop2_ondemand`（500/750/850 MHz）。临时将两者锁到最高档后，auto-hybrid 视频吞吐 12.804 FPS，与默认档 `12.829±0.015 FPS`（n=4）无实质差异；随后已恢复原 governor。
+- **热余量正常**：2026-10-25 多次空载核验 SoC/大核/NPU 温度约 `49.9–55.5°C`，高负载短测约 `67.5°C`；被动降频点为 `75°C/85°C`，critical 为 `115°C`，未发现限频日志。
+- **持久化边界**：该计算高性能档仍是“每次 SSH 登录/重启后手动恢复”，不是开机自启；性能复核前必须重新检查 CPU/NPU/DMC governor 与当前频率。
+- **一键核验脚本**：`tools/rk3588_performance.sh` 会幂等地设置五个计算 governor，并校验 current 是否等于各域最高 OPP、打印温度；板端副本位于 `/home/neardi/Workspace_Codex/rk3588_-rt-detr/tools/rk3588_performance.sh`。
+
 # SSH 交互注意事项（必须遵守）
 
 - 执行任何 ssh/scp 命令前，先对照 `SSH交互注意事项.md` 自检引号与特殊字符（Windows 命令行会吞掉内嵌双引号，导致远端 bash 解析错误）。
