@@ -819,3 +819,69 @@ test-dev 202 外部验证：全局 −0.53 宏 F1 **0.3674**；val 按类阈值�
 - `RTDETR_INPUT_SIZE` 编译选项，默认 640；可构建 512/704 对照二进制。
 - RT-DETR 输出解析改为自动根据 boxes/logits 形状推导 query 数与类别数。
 - C++ 单测新增可变 query 用例，当前 **32/32 通过**。
+
+## 2026-10-25 模型精选备份与主部署切换（任务18）
+
+### 1) 主路径
+
+- 路径：`/home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn`
+- 内容：`rtdetr_i25_c088_640_q150_l2.rknn`
+- SHA-256：`3b74ce22219c3c9baabcc280d8ed80f88722dfa641118fbaa0c5cb85dcc01431`
+- 大小：28 427 092 B
+- 原模型：`.rknn/rtdetr_i8_baseline.rknn`
+- 原模型 SHA-256：`39dee60d1ea3322d3d60382c9a874c500aa57c38d6ad9667643037f81295d878`
+
+替换后验证：
+
+- C++ 单测：**32/32 通过**
+- 主路径 1080p、`-p 2 -n 10 -P 3 -c -0.53f`：**25.07 FPS**
+- CPU：339.9%
+- Max RSS：1 246 068 KiB
+
+### 2) 板端精选模型
+
+板端 `.rknn/curated_20261025/` 保留：
+
+| 角色 | 文件 | SHA-256 前缀 |
+|------|------|--------------|
+| Baseline | `00_baseline_rtdetr_i8.rknn` | `39dee60d` |
+| Q300 Top1 | `q300_top1_uav-detr_fp16.rknn` | `370044a7` |
+| Q300 Top2 | `q300_top2_rtdetr_i25_c098.rknn` | `5b429b12` |
+| Q300 Top4 | `q300_top4_rtdetr_i8_c090.rknn` | `0e490bc1` |
+| Q150 Top1 | `q150_top1_rtdetr_i23_c090_l2.rknn` | `b40a98e9` |
+| Q150 Top2 | `q150_top2_rtdetr_i25_c088_l2.rknn` | `3b74ce22` |
+
+板端其余 RKNN 已从 `.rknn/` 根目录和 `experiments_20261025/` 清理；
+训练权重、FP32 ONNX 和非模型运行文件保留。
+
+### 3) VM 备份
+
+根目录：
+
+```text
+/home/zktd/Workspace_Codex/backups/rk3588_rtdetr_models_20261025/
+```
+
+- `all_valid/`：33 个语义有效 RKNN
+- `curated/`：6 个精选模型硬链接
+- `excluded_invalid/`：输出语义损坏的 split 模型
+- `experimental_unverified/`：未在板端完成验证的额外产物
+- `source_assets/`：原始 PT 与 FP32 ONNX
+- `manifest_all_valid.sha256`：33 项校验清单
+- `manifest_curated.sha256`：6 项校验清单
+
+全套备份约 1.6 GiB，精选模型逐个 SHA-256 与板端一致。
+
+### 4) 环境与教程
+
+板端环境：
+
+- Ubuntu 22.04.5 / kernel 6.1.118 / aarch64
+- RK3588，4×A76 + 4×A55，7.7 GiB RAM
+- RKNN runtime 2.3.2
+- GStreamer 1.22.9
+- OpenCV 4.5.4
+- GCC 11.4.0 / CMake 3.22.1 / Python 3.10.12
+- 摄像头 `/dev/video41`
+
+完整命令与回滚流程见 `RK3588模型备份与使用教程_[2026-10-25-01].md`。

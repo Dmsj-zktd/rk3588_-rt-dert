@@ -93,7 +93,9 @@ make -j$(nproc)
 
 ### 基本命令行格式
 ```bash
-./rtdetr_pipeline -m <模型路径> [选项]
+cd /home/neardi/Workspace_Codex/rk3588_-rt-detr/cpp_DMSJ/build
+MODEL=/home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn
+./rtdetr_pipeline -m "$MODEL" [选项]
 ```
 
 ### 常用选项
@@ -127,22 +129,22 @@ make -j$(nproc)
 
 #### 1. 使用 V4L2 摄像头（默认）
 ```bash
-./rtdetr_pipeline -m rtdetr_r18.rknn -d /dev/video41 -W 1280 -H 720 -F 30 -c -0.13 --display
+./rtdetr_pipeline -m "$MODEL" -d /dev/video41 -W 1280 -H 720 -F 30 -p 2 -n 10 -P 3 -c -0.53f --display
 ```
 
 #### 2. 处理本地视频文件
 ```bash
-./rtdetr_pipeline -m rtdetr_r18.rknn -v test.mp4 -o result.mp4 -c -0.13  # 模型输出未归一化，阈值范围 > -1
+./rtdetr_pipeline -m "$MODEL" -v test.mp4 -o result.mp4 -c -0.53f  # 模型输出未归一化，阈值范围 > -1
 ```
 
 #### 3. 处理单张图片
 ```bash
-./rtdetr_pipeline -m rtdetr_r18.rknn -i uav.jpg -o result_detect.jpg -c -0.13
+./rtdetr_pipeline -m "$MODEL" -i uav.jpg -o result_detect.jpg -c -0.53f
 ```
 
 #### 4. 仅显示性能（不保存视频）
 ```bash
-./rtdetr_pipeline -m rtdetr_r18.rknn -v test.mp4
+./rtdetr_pipeline -m "$MODEL" -v test.mp4 -p 2 -n 10 -P 3 -c -0.53f
 ```
 
 > **提示**：程序运行中会每隔 30 帧输出各阶段平均耗时及实时 FPS。按 `Ctrl+C` 优雅退出，自动刷新视频缓存。
@@ -638,3 +640,61 @@ rtdetr_i25_c088_640_q150_l2.rknn
 - 新增 `tools/export_uavdetr_onnx.py`、`tools/finetune_uavdetr.py`、`tools/visdrone_to_yolo.py` 及标签转换单测。
 - C++ 单测 **32/32 通过**。
 - 完整实验数据见 `模型实时化优化_[2026-10-25-01].md`。
+
+---
+
+## 任务18：模型精选备份与主部署切换（2026-10-25）
+
+### 18.1 当前主模型
+
+主部署路径继续使用：
+
+```text
+/home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn
+```
+
+文件内容已切换为综合最佳的 `rtdetr_i25_c088_640_q150_l2.rknn`：
+
+- SHA-256：`3b74ce22219c3c9baabcc280d8ed80f88722dfa641118fbaa0c5cb85dcc01431`
+- 大小：28 427 092 B
+- 输入：640×640、150 queries、2 层 decoder
+- Val AP/AP50/AP75：0.2049 / 0.3556 / 0.2024
+- 1080p：25.04±0.09 FPS @n10
+
+原始模型另存为：
+
+```text
+.rknn/rtdetr_i8_baseline.rknn
+```
+
+SHA-256：`39dee60d1ea3322d3d60382c9a874c500aa57c38d6ad9667643037f81295d878`
+
+### 18.2 板端精选模型
+
+保留目录：
+
+```text
+.rknn/curated_20261025/
+```
+
+该目录只保留原始 baseline、Q300 Top1/2/4、Q150 Top1/2，共 6 个精选模型。其余板端 RKNN 已清理。
+
+### 18.3 备份与教程
+
+- VM 全量备份：`/home/zktd/Workspace_Codex/backups/rk3588_rtdetr_models_20261025/`
+- 33 个语义有效模型：`all_valid/`
+- SHA-256 清单：`manifest_all_valid.sha256`
+- 6 个精选模型：`curated/`
+- 无效/未验证产物：分别隔离在 `excluded_invalid/` 和 `experimental_unverified/`
+- 完整环境、命令、阈值、测试和回滚说明见 `RK3588模型备份与使用教程_[2026-10-25-01].md`
+
+主模型运行命令：
+
+```bash
+./cpp_DMSJ/build/rtdetr_pipeline \
+  -m /home/neardi/Workspace_Codex/models/RT-DETR-RK3588-Models/.rknn/rtdetr_i8.rknn \
+  -p 2 -n 10 -P 3 -c -0.53f
+```
+
+验证结果：替换后 C++ 单测 **32/32 通过**，主路径实际视频 **25.07 FPS**。旧任务6 Gherkin 中的
+`39dee60…` 哈希属于历史 baseline，当前对应文件为 `rtdetr_i8_baseline.rknn`。
