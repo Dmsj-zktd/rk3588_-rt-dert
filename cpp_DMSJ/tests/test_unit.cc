@@ -334,6 +334,29 @@ void test_resolve_output_indices()
 	PASS();
 }
 
+void test_resolve_variable_queries()
+{
+	TEST("resolve variable query outputs");
+
+	std::vector<rknn_tensor_attr> attrs(5);
+	for (auto& a : attrs) memset(&a, 0, sizeof(a));
+	attrs[0].n_elems = 2100;
+	attrs[1].n_elems = 600;
+	attrs[2].n_elems = 1500;
+	attrs[3].n_elems = 600;
+	attrs[4].n_elems = 1500;
+
+	int boxes_idx = -1;
+	int logits_idx = -1;
+	resolve_rtdetr_output_indices(attrs, boxes_idx, logits_idx);
+
+	ASSERT_EQ(boxes_idx, 3, "150-query boxes index mismatch");
+	ASSERT_EQ(logits_idx, 4, "150-query logits index mismatch");
+	ASSERT_EQ(infer_rtdetr_num_classes(600, 1500), 10, "class inference failed");
+	ASSERT_EQ(infer_rtdetr_num_classes(600, 1400), -1, "invalid shape must fail");
+	PASS();
+}
+
 void test_rknn_zero_copy_matches_infer_only()
 {
 	TEST("rknn_zero_copy_matches_infer_only");
@@ -1066,6 +1089,7 @@ int main()
 	test_conf_class_parse();
 	test_decode_with_class_conf();
 	test_resolve_output_indices();
+	test_resolve_variable_queries();
 	test_rknn_zero_copy_matches_infer_only();
 
 	test_bounded_queue();
