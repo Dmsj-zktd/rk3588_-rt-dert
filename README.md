@@ -698,3 +698,77 @@ SHA-256：`39dee60d1ea3322d3d60382c9a874c500aa57c38d6ad9667643037f81295d878`
 
 验证结果：替换后 C++ 单测 **32/32 通过**，主路径实际视频 **25.07 FPS**。旧任务6 Gherkin 中的
 `39dee60…` 哈希属于历史 baseline，当前对应文件为 `rtdetr_i8_baseline.rknn`。
+
+---
+
+## 任务20：原始 `.pt` 与 FP32 ONNX 精度一致性（2026-10-29）
+
+### 20.1 结论
+
+原始 `best-original.pt` 的 20 094 584 个参数全部为 `torch.float32`。在
+VisDrone val 上使用同一套 640×640 直接拉伸、argmax 解码和忽略区规则时，
+原始 `.pt` 与 FP32 ONNX 的精度差没有统计显著性：
+
+| 指标 | 原始 `.pt` | FP32 ONNX | 差值（PT−FP32） |
+|------|-----------:|----------:|----------------:|
+| AP | **0.2834** | **0.2803** | **+0.0031** |
+| AP50 | **0.4737** | **0.4718** | **+0.0019** |
+| AP75 | **0.2766** | **0.2732** | **+0.0034** |
+
+该表为 69 张系统抽样（文件名排序后每 8 张取 1 张）。图像级配对
+bootstrap 1000 次的 AP 差值 95% CI 为 `[-0.0013, +0.0088]`，跨 0，
+因此 **FP32 ONNX 导出没有可辨识的精度损失**。
+
+项目已有全量 548 张 FP32 ONNX 检测重新复算仍为：
+
+```text
+AP    = 0.2180
+AP50  = 0.3725
+AP75  = 0.2208
+```
+
+69 张子集与全量值的差异来自抽样图像的难度分布，不能用子集点估计替代
+全量 AP。纯 CPU 运行原始 `.pt` 约 0.25 img/s，全量 548 张约需 36 分钟，
+因此 `.pt` 使用 69 张直接测量，并以数值等价的 FP32 ONNX 提供全量参考。
+
+### 20.2 新增工具与用法
+
+`tools/rtdetr_pt_dump.py` 支持原始 `.pt` 与 FP32 ONNX 两种后端，输出统一
+检测格式 `<stem> <class_id> <score> <x1> <y1> <x2> <y2>`：
+
+```bash
+# 原始 PyTorch checkpoint
+python tools/rtdetr_pt_dump.py \
+  --pt /home/zktd/Workspace_Codex/models/RT-DETR-RK3588-Models/.pt/best-original.pt \
+  --images /path/to/VisDrone2019-DET-val/images \
+  --out outputs/pt_detections.txt \
+  --batch 8 --threads 8
+
+# 同语义 FP32 ONNX 组合输出
+python tools/rtdetr_pt_dump.py \
+  --onnx /home/zktd/Workspace_Codex/models/RT-DETR-RK3588-Models/.onnx/best_rtdetr_npu.onnx \
+  --images /path/to/VisDrone2019-DET-val/images \
+  --out outputs/fp32_detections.txt \
+  --threads 8
+
+# 统一 mAP 评测
+python tools/visdrone_map.py \
+  --det outputs/pt_detections.txt \
+  --ann /path/to/VisDrone2019-DET-val/annotations \
+  --img-dir /path/to/VisDrone2019-DET-val/images \
+  --conf 0.468 --ignore-regions
+```
+
+ONNX 必须使用图内 `pred_logits [1,300,14]` 组合输出，其中前 4 项为归一化
+框，后 10 项为类别分数；不要把未 sigmoid 的其他辅助输出与原始 `.pt`
+组合输出混用。
+
+### 20.3 归档与验证
+
+- `tools/pt_sample69_detections.txt.gz`：原始 `.pt` 69 张检测导出。
+- `tools/fp32_sample69_detections.txt.gz`：FP32 ONNX 同批检测导出。
+- `tools/pt_sample69_map.txt` / `tools/fp32_sample69_map.txt`：两侧完整评测日志。
+- `tools/tests/test_rtdetr_pt_dump.py`：预处理、框反变换、无效框过滤和
+  ONNX 组合输出选择测试；工具测试 **6/6 通过**。
+- 完整指标、模型 SHA-256、环境和 bootstrap 口径见 `METRICS.md` 的
+  “2026-10-29 原始 `.pt` 与 FP32 ONNX 精度一致性”章节。

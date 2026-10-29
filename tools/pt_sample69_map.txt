@@ -1,0 +1,29 @@
+ignored-region rule ON: dropped 1283 detections (0.78%)
+images_with_detections = 69, gt_images = 69
+classes = 10
+
+per-class: GT  AP(0.5:0.95)  AP50
+  Pedestrian          1010  0.2475  0.5333
+  People               718  0.2079  0.5130
+  Bicycle              155  0.0918  0.2173
+  Car                 1779  0.6064  0.8555
+  Van                  237  0.3557  0.4746
+  Truck                 95  0.2464  0.3563
+  Tricycle             137  0.2326  0.4419
+  Awning-tricycle       83  0.0719  0.1176
+  Bus                   36  0.4919  0.6315
+  Motor                706  0.2822  0.5965
+
+== COCO-style summary ==
+AP      = 0.2834
+AP50    = 0.4737
+AP75    = 0.2766
+AP50_small   = 0.3255
+AP50_medium  = 0.5136
+AP50_large   = 0.3600
+AP_small(0.5:0.95) = 0.1578
+AP_medium(0.5:0.95) = 0.3314
+AP_large(0.5:0.95) = 0.2887
+
+detections_total = 19417 (281.41/img), gt_objects = 4956 (71.83/img)
+op thr=0.468   (sigmoid=0.615): TP=  2726 FP=   581 FN=  2230  P=0.8243 R=0.5500 F1=0.6598
